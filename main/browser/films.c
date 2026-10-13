@@ -195,7 +195,7 @@ static void search_url(const char *query, char *url, size_t sz)
     if (query[0] == '\0') {
         /* "популярное": whole collection by download count */
         snprintf(url, sz,
-                 "https://archive.org/advancedsearch.php"
+                 "http://archive.org/advancedsearch.php"
                  "?q=collection%%3A%%28feature_films%%29"
                  "&fl%%5B%%5D=identifier&fl%%5B%%5D=title"
                  "&sort%%5B%%5D=-downloads&rows=20&page=1&output=json");
@@ -204,10 +204,10 @@ static void search_url(const char *query, char *url, size_t sz)
     char q[160];
     web_url_encode(query, q, sizeof(q));
     snprintf(url, sz,
-             "https://archive.org/advancedsearch.php"
-             "?q=collection%%3A%%28feature_films%%29%%20AND%%20title%%3A%%28%s%%29"
-             "&fl%%5B%%5D=identifier&fl%%5B%%5D=title&rows=20&page=1&output=json",
-             q);
+             "http://archive.org/advancedsearch.php"
+             "?q=mediatype%%3A%%28movies%%29%%20AND%%20%%28title%%3A%%28%s%%29%%20OR%%20%s%%29"
+             "&fl%%5B%%5D=identifier&fl%%5B%%5D=title&sort%%5B%%5D=-downloads&rows=20&page=1&output=json",
+             q, q);
 }
 
 static bool ident_ok(const char *s)
@@ -377,7 +377,7 @@ films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz)
     }
 
     char meta_url[FILM_IDENT_MAX + 40];
-    snprintf(meta_url, sizeof(meta_url), "https://archive.org/metadata/%s", ident);
+    snprintf(meta_url, sizeof(meta_url), "http://archive.org/metadata/%s", ident);
 
     prog(FILMS_PROG_METADATA, 0, 0);
     char *body = NULL;
@@ -408,11 +408,11 @@ films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz)
 
     bool have_node = server[0] != '\0' && dir[0] == '/';
     if (have_node &&
-        snprintf(url, urlsz, "https://%s%s/%s", server, dir, enc) >= (int)urlsz) {
+        snprintf(url, urlsz, "http://%s%s/%s", server, dir, enc) >= (int)urlsz) {
         have_node = false;      /* truncated - fall through to /download */
     }
     if (!have_node &&
-        snprintf(url, urlsz, "https://archive.org/download/%s/%s",
+        snprintf(url, urlsz, "http://archive.org/download/%s/%s",
                  ident, enc) >= (int)urlsz) {
         ESP_LOGW(TAG, "%s: play URL does not fit %u bytes", ident,
                  (unsigned)urlsz);
@@ -498,6 +498,7 @@ static int range_read(const char *url, uint64_t offset,
         .timeout_ms = 20000,
         .max_redirection_count = 10,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .skip_cert_common_name_check = true,
         .keep_alive_enable = false,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);

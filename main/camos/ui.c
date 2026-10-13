@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "app_overlay.h"
 #include "camos/ui.h"
 #include "camos/ui_icons.h"
@@ -183,6 +184,74 @@ void ui_circle(uint16_t *fb, int fb_w, int fb_h,
     }
 }
 
+void ui_circle_frame(uint16_t *fb, int fb_w, int fb_h,
+                     int cx, int cy, int r, uint16_t color)
+{
+    if (fb == NULL || r <= 0) {
+        return;
+    }
+    int x = 0;
+    int y = r;
+    int d = 3 - 2 * r;
+
+    #define PLOT_CIRCLE_PT(px, py) do { \
+        int _x = (px), _y = (py); \
+        if (_x >= 0 && _x < fb_w && _y >= 0 && _y < fb_h) { \
+            fb[(size_t)_y * fb_w + _x] = color; \
+        } \
+    } while (0)
+
+    while (y >= x) {
+        PLOT_CIRCLE_PT(cx + x, cy + y);
+        PLOT_CIRCLE_PT(cx - x, cy + y);
+        PLOT_CIRCLE_PT(cx + x, cy - y);
+        PLOT_CIRCLE_PT(cx - x, cy - y);
+        PLOT_CIRCLE_PT(cx + y, cy + x);
+        PLOT_CIRCLE_PT(cx - y, cy + x);
+        PLOT_CIRCLE_PT(cx + y, cy - x);
+        PLOT_CIRCLE_PT(cx - y, cy - x);
+        x++;
+        if (d > 0) {
+            y--;
+            d = d + 4 * (x - y) + 10;
+        } else {
+            d = d + 4 * x + 6;
+        }
+    }
+    #undef PLOT_CIRCLE_PT
+}
+
+void ui_line(uint16_t *fb, int fb_w, int fb_h,
+             int x0, int y0, int x1, int y1, uint16_t color)
+{
+    if (fb == NULL) {
+        return;
+    }
+    int dx = abs(x1 - x0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+
+    while (1) {
+        if (x0 >= 0 && x0 < fb_w && y0 >= 0 && y0 < fb_h) {
+            fb[(size_t)y0 * fb_w + x0] = color;
+        }
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
 void ui_card(uint16_t *fb, int fb_w, int fb_h,
              int x0, int y0, int x1, int y1, bool pressed)
 {
@@ -217,11 +286,13 @@ int ui_text(uint16_t *fb, int fb_w, int fb_h,
     int glyph_h = UI_FONT_H * scale;
 
     for (const char *p = s; *p != '\0'; x += char_step) {
-        if (x + char_step <= 0 || x >= fb_w || y + glyph_h <= 0 || y >= fb_h) {
+        int cp = ui_utf8_next(&p);
+        if (x + char_step <= 0 || y + glyph_h <= 0 || y >= fb_h) {
             continue; /* whole glyph outside the canvas */
         }
-
-        int cp = ui_utf8_next(&p);
+        if (x >= fb_w) {
+            break; /* reached or passed right canvas border */
+        }
         const uint8_t *glyph;
         if (cp >= 0x20 && cp <= 0x7E) {
             glyph = app_overlay_font8x8[cp - 0x20];

@@ -11,7 +11,10 @@ dependencies:
   espressif/esp_lcd_ek79007:
     version: 1.*
     public: true
-  espressif/esp_lcd_jd9365: "^1.0.2"
+  # JD9365 берётся из локальной копии в components/ (пропатчена под IDF 6.1:
+  # поле rgb_ele_order). Registry 1.0.4 ещё использует удалённое в 6.1 поле
+  # color_space и не собирается; локальная копия подключена через
+  # EXTRA_COMPONENT_DIRS + PRIV_REQUIRES в main/CMakeLists.txt.
   espressif/esp_lcd_jd9165: "*"
   espressif/esp_lcd_st7701: "*"
 

@@ -19,6 +19,8 @@ typedef struct {
     int x;
     int y;
     int id;
+    int raw_x;
+    int raw_y;
 } touch_point_t;
 
 /**
@@ -56,6 +58,31 @@ const char *touch_chip_name(void);
  * port twice. Returns NULL when touch_init() has not created a bus.
  */
 void *touch_get_i2c_bus(void);
+
+/**
+ * @brief Структура диагностики крайних точек касания (экстремумов).
+ */
+typedef struct {
+    int raw_min_x;
+    int raw_max_x;
+    int raw_min_y;
+    int raw_max_y;
+    int screen_min_x;
+    int screen_max_x;
+    int screen_min_y;
+    int screen_max_y;
+    uint32_t total_points;
+} touch_diag_extremes_t;
+
+/**
+ * @brief Получить текущие накопленные экстремумы (крайние точки) координат тача.
+ */
+void touch_diag_get_extremes(touch_diag_extremes_t *out);
+
+/**
+ * @brief Сбросить накопленную статистику крайних точек.
+ */
+void touch_diag_reset_extremes(void);
 
 #ifdef __cplusplus
 }

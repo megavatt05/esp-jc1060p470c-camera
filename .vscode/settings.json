@@ -1,5 +1,5 @@
 {
-    "idf.currentSetup": "C:\\esp\\v6.0.3\\esp-idf",
+    "idf.currentSetup": "C:\\esp\\v6.1\\esp-idf",
     "idf.openOcdConfigs": [
         "board/esp32p4-ftdi.cfg"
     ],
@@ -11,5 +11,8 @@
       "--background-index",
       "--query-driver=**",
       "--compile-commands-dir=c:\\2\\JC1060P470C-camera-photo-app\\build"
-    ]
+    ],
+    "idf.flashType": "UART",
+    "idf.port": "COM10",
+    "idf.monitorPort": "COM10"
 }

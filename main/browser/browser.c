@@ -34,6 +34,7 @@
 #include "browser/web_client.h"
 #include "browser/html_text.h"
 #include "browser/films.h"
+#include "browser/touch_calib.h"
 #include "browser/browser.h"
 #if CONFIG_EB_MEDIA_ENABLE
 #include "media/media_player.h"
@@ -109,7 +110,9 @@ enum {
     BTN_WIFI_TEST,
     BTN_WIFI_CONN,          /* подключить сохранённую */
     BTN_WIFI_ROW,           /* + index скан-сети */
-    BTN_CHAR = 0x20,        /* ids >= BTN_CHAR are literal chars */
+    BTN_TOUCH_TEST,         /* экран тестирования и калибровки тача */
+    BTN_CASE,               /* переключение регистра: ЗАГЛ / стр */
+    BTN_CHAR = 0x1000,      /* маркер, что нажата буква/символ */
 };
 
 typedef enum {
@@ -121,6 +124,7 @@ typedef enum {
     ST_PAGE,
     ST_BUSY,                /* live busy card: animator redraws it while
                              * the browser task is blocked on the network */
+    ST_TOUCH_TEST,          /* тестовый экран тача и калибровки */
 #if CONFIG_EB_MEDIA_ENABLE
     ST_RADIO,               /* radio screen (stations + controls)      */
     ST_VIDEO,               /* video screen (presets + custom URL)     */
@@ -143,6 +147,7 @@ static struct {
     char query[96];
     bool engine_google;
     bool kb_ru;             /* on-screen keyboard layout: false=EN true=RU */
+    bool kb_upper;          /* регистр: false=строчные, true=ЗАГЛ */
 
     web_result_t results[WEB_RESULTS_MAX];
     int result_count;
@@ -380,27 +385,46 @@ static void draw_scrollbar(uint16_t *fb, int y0, int y1, int total,
 #define KB_ROWS_NUM 4
 #define KB_ROW_MAX  13
 
-static const uint32_t KB_EN[KB_ROWS_NUM][KB_ROW_MAX] = {
+static const uint32_t KB_EN_LOWER[KB_ROWS_NUM][KB_ROW_MAX] = {
     { '1','2','3','4','5','6','7','8','9','0','-','_', 0 },
     { 'q','w','e','r','t','y','u','i','o','p', 0 },
     { 'a','s','d','f','g','h','j','k','l','.', 0 },
     { 'z','x','c','v','b','n','m','_','/', 0 },
 };
 
-/* ЙЦУКЕН: ё on the digit row, standard letter rows, '.'/"/" kept */
-static const uint32_t KB_RU[KB_ROWS_NUM][KB_ROW_MAX] = {
+static const uint32_t KB_EN_UPPER[KB_ROWS_NUM][KB_ROW_MAX] = {
+    { '1','2','3','4','5','6','7','8','9','0','-','_', 0 },
+    { 'Q','W','E','R','T','Y','U','I','O','P', 0 },
+    { 'A','S','D','F','G','H','J','K','L',':', 0 },
+    { 'Z','X','C','V','B','N','M','?','/', 0 },
+};
+
+/* ЙЦУКЕН: строчные буквы */
+static const uint32_t KB_RU_LOWER[KB_ROWS_NUM][KB_ROW_MAX] = {
     { 0x0451,'1','2','3','4','5','6','7','8','9','0','-', 0 },
     { 0x0439,0x0446,0x0443,0x043A,0x0435,0x043D,0x0433,0x0448,0x0449,0x0437,0x0445,0x044A, 0 },
     { 0x0444,0x044B,0x0432,0x0430,0x043F,0x0440,0x043E,0x043B,0x0434,0x0436,0x044D, 0 },
     { 0x044F,0x0447,0x0441,0x043C,0x0438,0x0442,0x044C,0x0431,0x044E,'.', 0 },
 };
 
+/* ЙЦУКЕН: ЗАГЛАВНЫЕ буквы (Ё, Й, Ц, У, К, Е, Н ...) */
+static const uint32_t KB_RU_UPPER[KB_ROWS_NUM][KB_ROW_MAX] = {
+    { 0x0401,'1','2','3','4','5','6','7','8','9','0','-', 0 },
+    { 0x0419,0x0426,0x0423,0x041A,0x0415,0x041D,0x0413,0x0428,0x0429,0x0417,0x0425,0x042A, 0 },
+    { 0x0424,0x042B,0x0412,0x0410,0x041F,0x0420,0x041E,0x041B,0x0414,0x0416,0x042D, 0 },
+    { 0x042F,0x0427,0x0421,0x041C,0x0418,0x0422,0x042C,0x0411,0x042E,',', 0 },
+};
+
 static const uint32_t (*kb_rows(void))[KB_ROW_MAX]
 {
-    return br.kb_ru ? KB_RU : KB_EN;
+    if (br.kb_ru) {
+        return br.kb_upper ? KB_RU_UPPER : KB_RU_LOWER;
+    } else {
+        return br.kb_upper ? KB_EN_UPPER : KB_EN_LOWER;
+    }
 }
 
-/* UTF-8 encode one key codepoint into buf (3 bytes); returns byte length */
+/* UTF-8 encode one key codepoint into buf (4 bytes max); returns byte length */
 static int kb_key_label(uint32_t cp, char *buf)
 {
     if (cp < 0x80) {
@@ -414,15 +438,14 @@ static int kb_key_label(uint32_t cp, char *buf)
     return 2;
 }
 
-/* Bottom function row: SPC / DEL / EN|RU / engine / GO.  Shared by
- * draw_keyboard() and keyboard_hit() so drawing and hit-testing can never
- * diverge.  NULL labels are resolved from the runtime state. */
+/* Нижний ряд: SPC / DEL / ЗАГЛ(Shift) / РУ(EN) / НАЗАД(GGL) / GO */
 static const struct { int w; const char *label; int id; } kb_bottom[] = {
-    { 200, "SPC", BTN_SPC },
-    { 150, "DEL", BTN_DEL },
-    { 150, NULL,  BTN_KBD },        /* EN | RU                    */
-    { 170, NULL,  BTN_ENGINE },     /* GGL | DDG | НАЗАД          */
-    { 170, "GO",  BTN_GO },
+    { 180, "SPC",  BTN_SPC },
+    { 130, "DEL",  BTN_DEL },
+    { 130, NULL,   BTN_CASE },        /* ЗАГЛ | стр                 */
+    { 130, NULL,   BTN_KBD },         /* EN | РУ                    */
+    { 150, NULL,   BTN_ENGINE },      /* GGL | DDG | НАЗАД          */
+    { 150, "GO",   BTN_GO },
 };
 #define KB_BOTTOM_N (sizeof(kb_bottom) / sizeof(kb_bottom[0]))
 
@@ -431,12 +454,14 @@ static const char *kb_bottom_label(size_t i)
     if (kb_bottom[i].label != NULL) {
         return kb_bottom[i].label;
     }
+    if (kb_bottom[i].id == BTN_CASE) {
+        return br.kb_upper ? "ЗАГЛ" : "стр";
+    }
     if (kb_bottom[i].id == BTN_KBD) {
         return br.kb_ru ? "РУ" : "EN";
     }
 #if CONFIG_EB_MEDIA_ENABLE
-    /* on the media URL / films search screens the engine slot doubles as
-     * CANCEL */
+    /* on the media URL / films search screens the engine slot doubles as CANCEL */
     if (kb_bottom[i].id == BTN_ENGINE &&
         (br.state == ST_URLIN || br.state == ST_FILMS || br.state == ST_WIFI_PASS)) {
         return "НАЗАД";
@@ -469,7 +494,10 @@ static void kb_draw_key(uint16_t *fb, int x, int y, int w, const char *lab, int 
     uint16_t border = UI_COLOR_BORDER;
     if (id == BTN_DEL) {
         txt = UI_COLOR_ERR;
-    } else if (id == BTN_KBD || id == BTN_ENGINE) {
+    } else if (id == BTN_CASE && br.kb_upper) {
+        txt = UI_COLOR_OK;
+        border = UI_COLOR_OK;
+    } else if (id == BTN_CASE || id == BTN_KBD || id == BTN_ENGINE) {
         txt = UI_COLOR_ACCENT;
         border = UI_COLOR_ACCENT2;
     }
@@ -495,7 +523,7 @@ static void draw_keyboard(uint16_t *fb)
         int x = (LCD_W - row_w) / 2;
 
         for (int k = 0; k < n; k++, x += KEY_W + KEY_GAP) {
-            char lab[3];
+            char lab[4];
             kb_key_label(rows[r][k], lab);
             ui_rrect(fb, LCD_W, LCD_H, x, y, x + KEY_W, y + KEY_H, UI_R_KEY, UI_COLOR_KEY);
             ui_rrect_frame(fb, LCD_W, LCD_H, x, y, x + KEY_W, y + KEY_H, UI_R_KEY,
@@ -515,9 +543,12 @@ static void draw_keyboard(uint16_t *fb)
     }
 }
 
-/* Returns BTN_* id or the key codepoint (>= BTN_CHAR), or 0 on a miss */
-static int keyboard_hit(int x, int y)
+/* Returns BTN_* id. If returning BTN_CHAR, sets *out_cp to the key codepoint. */
+static int keyboard_hit(int x, int y, uint32_t *out_cp)
 {
+    if (out_cp != NULL) {
+        *out_cp = 0;
+    }
     if (y < CONTENT_Y1) {
         return BTN_NONE;
     }
@@ -535,7 +566,10 @@ static int keyboard_hit(int x, int y)
         if (y >= ky && y < ky + KEY_H) {
             for (int k = 0; k < n; k++, kx += KEY_W + KEY_GAP) {
                 if (x >= kx && x < kx + KEY_W) {
-                    return (int)rows[r][k];
+                    if (out_cp != NULL) {
+                        *out_cp = rows[r][k];
+                    }
+                    return BTN_CHAR;
                 }
             }
             return BTN_NONE;
@@ -588,12 +622,12 @@ static void busy_close(void);
 static void draw_loading(uint16_t *fb, const char *what);
 
 static const struct { const char *name; const char *url; } radio_stations[] = {
-    { "Европа Плюс",    "http://ep128server.streamr.ru:8030/ep128" },
-    { "Радио Рекорд",   "http://air.radiorecord.ru:805/rr_320" },
-    { "Дорожное радио", "http://dorognoe.hostingradio.ru:8000/dorognoe" },
-    { "Радио Дача",     "http://dacha.hostingradio.ru:8025/radiodacha96.aacp" },
-    { "SomaFM Groove",  "https://ice1.somafm.com/groovesalad-128-mp3" },
-    { "Radio Paradise", "http://stream.radioparadise.com/mp3-128" },
+    { "DFM",            "http://dfm.hostingradio.ru/dfm128.mp3" },
+    { "Русское Радио",  "http://rusradio.hostingradio.ru/rusradio128.mp3" },
+    { "Радио Маяк",     "http://icecast.vgtrk.cdnvideo.ru/mayakfm_mp3_128kbps" },
+    { "Вести FM",       "http://icecast.vgtrk.cdnvideo.ru/vestifm_mp3_128kbps" },
+    { "Европа Плюс",    "http://emg01.hostingradio.ru/ep128.mp3" },
+    { "Ретро FM",       "http://emg01.hostingradio.ru/retro128.mp3" },
 };
 #define RADIO_STATIONS_N (sizeof(radio_stations) / sizeof(radio_stations[0]))
 
@@ -615,12 +649,14 @@ static const struct { const char *name; const char *url; } video_presets[] = {
 static char wifi_pending_ssid[33]; /* SSID выбранной сети, ждём пароль */
 
 static const ui_button_t home_apps[] = {
-    { 20,  108, 320, 142, "РАДИО",  BTN_RADIO, 3 },
-    { 352, 108, 320, 142, "ВИДЕО",  BTN_VIDEO, 3 },
-    { 684, 108, 320, 142, "ФИЛЬМЫ", BTN_FILMS, 3 },
+    { 20,  108, 320, 142, "РАДИО",     BTN_RADIO, 3 },
+    { 352, 108, 320, 142, "ВИДЕО",     BTN_VIDEO, 3 },
+    { 684, 108, 320, 142, "ФИЛЬМЫ",    BTN_FILMS, 3 },
 #if CONFIG_EB_WIFI_ENABLE
-    /* широкая полоса под карточками приложений (не клавиатура) */
-    { 20,  255, 984, 72, "Wi-Fi",  BTN_WIFI,  2 },
+    { 20,  255, 484, 72,  "Wi-Fi",     BTN_WIFI,  2 },
+    { 520, 255, 484, 72,  "ТАЧ ТЕСТ",  BTN_TOUCH_TEST, 2 },
+#else
+    { 20,  255, 984, 72,  "ТАЧ ТЕСТ",  BTN_TOUCH_TEST, 2 },
 #endif
 };
 #define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
@@ -638,12 +674,13 @@ static bool home_apps_hit(int x, int y, int *out_id)
 
 static const ui_icon_t *home_app_icon(size_t i)
 {
-    /* иконки карточек HOME: радио / видео / фильмы / Wi‑Fi */
+    /* иконки карточек HOME: радио / видео / фильмы / Wi‑Fi / тач тест */
     static const ui_icon_t *const icons[] = {
         &ui_icon_music, &ui_icon_clap, &ui_icon_film,
 #if CONFIG_EB_WIFI_ENABLE
         &ui_icon_globe,
 #endif
+        &ui_icon_refresh,
     };
     if (i >= sizeof(icons) / sizeof(icons[0])) {
         return &ui_icon_search;
@@ -656,6 +693,7 @@ static const uint16_t home_app_color[] = {
 #if CONFIG_EB_WIFI_ENABLE
     UI_COLOR_ACCENT2,
 #endif
+    UI_COLOR_ACCENT,
 };
 
 /* Radio: station tile geometry, shared by draw and hit-test */
@@ -1962,6 +2000,7 @@ static void draw_screen(void)
     case ST_RESULTS:  draw_results(fb);      break;
     case ST_PAGELOAD: draw_loading(fb, "открываем страницу");    break;
     case ST_PAGE:     draw_page(fb);         break;
+    case ST_TOUCH_TEST: touch_calib_draw(fb); break;
 #if CONFIG_EB_MEDIA_ENABLE
     case ST_RADIO:    draw_radio(fb);        break;
     case ST_VIDEO:    draw_video(fb);        break;
@@ -2088,6 +2127,15 @@ static void browser_task(void *arg)
         bool tap = touch_now && !prev_touch;    /* press-and-release edge */
 
         switch (br.state) {
+        case ST_TOUCH_TEST:
+            if (touch_calib_handle_input(pts, n, tap, tap_x, tap_y)) {
+                br.state = ST_HOME;
+                draw_screen();
+            } else if (touch_now || prev_touch) {
+                draw_screen();
+            }
+            break;
+
 #if CONFIG_EB_WIFI_ENABLE
         case ST_WIFI:
             if (tap) {
@@ -2111,12 +2159,17 @@ static void browser_task(void *arg)
                     br.state = ST_WIFI;
                     draw_screen();
                 } else {
-                    int id = keyboard_hit(tap_x, tap_y);
-                    if (id >= BTN_CHAR) {
-                        query_append_cp((uint32_t)id);
+                    uint32_t cp = 0;
+                    int id = keyboard_hit(tap_x, tap_y, &cp);
+                    if (id == BTN_CHAR) {
+                        query_append_cp(cp);
                         draw_screen();
                     } else {
                         switch (id) {
+                        case BTN_CASE:
+                            br.kb_upper = !br.kb_upper;
+                            draw_screen();
+                            break;
                         case BTN_KBD:
                             br.kb_ru = !br.kb_ru;
                             draw_screen();
@@ -2135,6 +2188,10 @@ static void browser_task(void *arg)
                         }
                         case BTN_SPC:
                             query_append_cp(' ');
+                            draw_screen();
+                            break;
+                        case BTN_ENGINE: /* НАЗАД */
+                            br.state = ST_WIFI;
                             draw_screen();
                             break;
                         case BTN_GO:
@@ -2174,24 +2231,13 @@ static void browser_task(void *arg)
 
         case ST_HOME:
             if (tap) {
-                int id = BTN_NONE;
+                int app_id = BTN_NONE;
                 if (urlrow_go_hit(tap_x, tap_y) && br.query[0] != '\0') {
-                    id = BTN_GO;
+                    do_search();
                 }
 #if CONFIG_EB_MEDIA_ENABLE
-                else if (home_apps_hit(tap_x, tap_y, &id)) {
-                    /* id filled by the helper */
-                }
-#endif
-                else {
-                    id = keyboard_hit(tap_x, tap_y);
-                }
-                if (id >= BTN_CHAR) {
-                    query_append_cp((uint32_t)id);
-                    draw_screen();
-                } else {
-                    switch (id) {
-#if CONFIG_EB_MEDIA_ENABLE
+                else if (home_apps_hit(tap_x, tap_y, &app_id)) {
+                    switch (app_id) {
 #if CONFIG_EB_WIFI_ENABLE
                     case BTN_WIFI:
                         br.state = ST_WIFI;
@@ -2211,37 +2257,59 @@ static void browser_task(void *arg)
                         br.state = ST_FILMS;
                         draw_screen();
                         break;
-#endif
-                    case BTN_KBD:
-                        br.kb_ru = !br.kb_ru;
+                    case BTN_TOUCH_TEST:
+                        touch_calib_reset();
+                        br.state = ST_TOUCH_TEST;
                         draw_screen();
-                        break;
-                    case BTN_DEL: {
-                        /* strip one whole UTF-8 codepoint, not one byte */
-                        size_t len = strlen(br.query);
-                        while (len > 0 &&
-                               (((unsigned char)br.query[len - 1]) & 0xC0) == 0x80) {
-                            len--;
-                        }
-                        if (len > 0) {
-                            br.query[len - 1] = '\0';
-                        }
-                        draw_screen();
-                        break;
-                    }
-                    case BTN_SPC:
-                        query_append_cp(' ');
-                        draw_screen();
-                        break;
-                    case BTN_ENGINE:
-                        br.engine_google = !br.engine_google;
-                        draw_screen();
-                        break;
-                    case BTN_GO:
-                        do_search();
                         break;
                     default:
                         break;
+                    }
+                }
+#endif
+                else {
+                    uint32_t cp = 0;
+                    int id = keyboard_hit(tap_x, tap_y, &cp);
+                    if (id == BTN_CHAR) {
+                        query_append_cp(cp);
+                        draw_screen();
+                    } else {
+                        switch (id) {
+                        case BTN_CASE:
+                            br.kb_upper = !br.kb_upper;
+                            draw_screen();
+                            break;
+                        case BTN_KBD:
+                            br.kb_ru = !br.kb_ru;
+                            draw_screen();
+                            break;
+                        case BTN_DEL: {
+                            /* strip one whole UTF-8 codepoint, not one byte */
+                            size_t len = strlen(br.query);
+                            while (len > 0 &&
+                                   (((unsigned char)br.query[len - 1]) & 0xC0) == 0x80) {
+                                len--;
+                            }
+                            if (len > 0) {
+                                br.query[len - 1] = '\0';
+                            }
+                            draw_screen();
+                            break;
+                        }
+                        case BTN_SPC:
+                            query_append_cp(' ');
+                            draw_screen();
+                            break;
+                        case BTN_ENGINE:
+                            br.engine_google = !br.engine_google;
+                            draw_screen();
+                            break;
+                        case BTN_GO:
+                            do_search();
+                            break;
+                        default:
+                            break;
+                        }
                     }
                 }
             }
@@ -2435,14 +2503,19 @@ static void browser_task(void *arg)
                 if (urlrow_go_hit(tap_x, tap_y) && br.query[0] != '\0') {
                     urlin_apply();
                 } else {
-                    int id = keyboard_hit(tap_x, tap_y);
-                    if (id >= BTN_CHAR) {
-                        query_append_cp((uint32_t)id);
+                    uint32_t cp = 0;
+                    int id = keyboard_hit(tap_x, tap_y, &cp);
+                    if (id == BTN_CHAR) {
+                        query_append_cp(cp);
                         draw_screen();
                     } else {
                         switch (id) {
                         case BTN_ENGINE:    /* НАЗАД on this screen */
                             br.state = br.urlin_video ? ST_VIDEO : ST_RADIO;
+                            draw_screen();
+                            break;
+                        case BTN_CASE:
+                            br.kb_upper = !br.kb_upper;
                             draw_screen();
                             break;
                         case BTN_KBD:
@@ -2493,10 +2566,11 @@ static void browser_task(void *arg)
 
         case ST_FILMS:
             if (tap) {
+                uint32_t cp = 0;
                 int id = urlrow_go_hit(tap_x, tap_y) ? BTN_GO
-                                                     : keyboard_hit(tap_x, tap_y);
-                if (id >= BTN_CHAR) {
-                    query_append_cp((uint32_t)id);
+                                                     : keyboard_hit(tap_x, tap_y, &cp);
+                if (id == BTN_CHAR) {
+                    query_append_cp(cp);
                     draw_screen();
                 } else {
                     switch (id) {
@@ -2505,6 +2579,10 @@ static void browser_task(void *arg)
                         break;
                     case BTN_ENGINE:         /* НАЗАД on this screen */
                         br.state = ST_HOME;
+                        draw_screen();
+                        break;
+                    case BTN_CASE:
+                        br.kb_upper = !br.kb_upper;
                         draw_screen();
                         break;
                     case BTN_KBD:
@@ -2572,7 +2650,7 @@ static void browser_task(void *arg)
         }
 
         prev_touch = touch_now;
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(br.state == ST_TOUCH_TEST ? 15 : 30));
     }
 }
 

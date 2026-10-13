@@ -508,13 +508,13 @@ static esp_err_t player_start(const char *url, bool video)
      * Нужен большой demux + HTTP read-ahead, чтобы переживать TLS reconnect
      * и Read timeout без хлопанья вентиля. 8–10 с запаса в PSRAM.
      * (E-PLAYBACK-SMOOTH: CPU низкий + buffering = сеть, не tinyh264.) */
-    /* Сеть через C6/SDIO: больше read-ahead, дольше prebuffer — меньше stall */
+    /* Сеть через C6/SDIO: для видео большой demux (8 МБ), для радио — лёгкий и быстрый старт */
     esp_player_buffer_config_t bcfg = {
-        .extractor_pool_size = 8 * 1024 * 1024, /* ~8 МБ demux */
-        .http_read_buf_size  = 1536 * 1024,     /* 1.5 МБ HTTP */
-        .prebuffer_resume_ms = 6000,            /* дольше копить до PLAY */
-        .rebuffer_enter_ms   = 1200,
-        .rebuffer_resume_ms  = 3500,
+        .extractor_pool_size = video ? (8 * 1024 * 1024) : (512 * 1024),
+        .http_read_buf_size  = video ? (1536 * 1024)     : (256 * 1024),
+        .prebuffer_resume_ms = video ? 6000              : 1500,
+        .rebuffer_enter_ms   = video ? 1200              : 600,
+        .rebuffer_resume_ms  = video ? 3500              : 1500,
         .rebuffer_grace_ms   = 600,
     };
     if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {

@@ -14,6 +14,7 @@ ESP-IDF компилирует только `main/` и `components/`.
 | `cyr_font_table.c` | эталонный вывод конвертера |
 | `ttf/DejaVuSansMono*.ttf` | TTF для LVGL-конвертера (для битмапа 8×8 TTF **не** использовать — замыливает ш/ж/щ) |
 | `lvgl_convert.sh` | конвертация TTF → C-шрифт формата LVGL через `npx lv_font_conv` |
+| `lvgl/lv_font_*.c` | **generated** — векторные шрифты LVGL9 (складывать сюда, а не в `main/`); см. ниже |
 
 ## Почему не TTF
 
@@ -44,16 +45,83 @@ python3 gen_cyr_from_psf.py        # таблица -> cyr_font_table.c + ASCII-
 
 ## LVGL-шрифт (векторный, если понадобится)
 
-Для крупного сглаженного текста (LVGL v8/v9):
+**Сюда пока не подключён LVGL**: прошивка ренесёт оверлей сама битмапами
+(`main/app_overlay.c`), поэтому `fonts/lvgl/` — задел под UI на LVGL9.
+Готовый рабочий пример LVGL9 на этой же плате — `~/Downloads/esp32P4`
+(XiaoZhi, board `guition-jc1060p470`, `lvgl/lvgl ~9.5.0` +
+`espressif/esp_lvgl_port 2.9.0`).
+
+Генерация (уже прогнана на этой машине, результат — `fonts/lvgl/lv_font_mono_16.c`):
 
 ```bash
 cd fonts
-./lvgl_convert.sh ttf/DejaVuSansMono.ttf 16 lv_font_mono_16.c
+./lvgl_convert.sh ttf/DejaVuSansMono.ttf 16 lvgl/lv_font_mono_16.c
+# или напрямую, с явным именем символа:
+npx --yes lv_font_conv --font ttf/DejaVuSansMono.ttf \
+    -r 0x20-0x7F -r 0x401 -r 0x451 -r 0x410-0x44F \
+    --size 16 --bpp 4 --format lvgl --no-compress \
+    --lv-font-name lv_font_mono_16 -o lvgl/lv_font_mono_16.c
 ```
 
-Диапазоны символов в скрипте: ASCII `0x20–0x7F`, `Ё/ё`, `А..я`.
-Требуется Node.js/npm — `npx` сам скачает `lv_font_conv` при первом запуске.
-Полученный `lv_font_*.c` добавляется в LVGL-проект как обычный `lv_font_t`.
+Диапазоны: ASCII `0x20–0x7F`, `Ё` `0x401`, `ё` `0x451`, `А..я` `0x410–0x44F`
+(161 глиф). Требуется Node.js/npm — `npx` сам скачает `lv_font_conv`.
+
+### Реальная цена шрифта в flash (измерено)
+
+Размер `.c` — это текст исходника, а не прошивка. Положительные цифры
+получены компиляцией `riscv32-esp-elf-gcc -Os` (IDF 6.1) и замером
+секции `.rodata`:
+
+| Кегль | bpp | сжатие | `.c`, Б | `.rodata` (flash), Б |
+|-------|-----|--------|---------|----------------------|
+| 16 px | 1 | нет | 32 695 | **3 147** |
+| 16 px | 4 | RLE (по умолчанию) | 56 444 | **6 953** |
+| 16 px | 4 | `--no-compress` | 66 443 | **8 755** |
+| 24 px | 4 | RLE | 118 980 | **17 476** |
+
+Выводы: один полный кириллический набор 16 px стоит ~7–9 КБ — «тяжёлые
+шрифты» это не 60 КБ исходника, а сумма по всем кеглям; RLE-сжатие экономит
+~20 % flash и стоит CPU на декодировании каждого глифа (в LVGL9 оно
+требует `CONFIG_LV_USE_FONT_COMPRESSED=y`, в `esp32P4` проекте оно
+выключено сознательно: `sdkconfig.defaults:57`).
+
+Уточнения из официальной документации LVGL (проверено через MCP-серверы
+`lvgl` и `espressif-docs`):
+
+- сжатый шрифт рендерится **примерно на 30 % медленнее**; рекомендуют
+  сжимать только самые крупные кегли — они дают больше всего экономии и
+  используются реже основных.
+- `--bpp 3` существует **только со сжатием** (конвертер иначе ошибается;
+  для `--format bin` ограничение снимается молча — не полагайтесь на него).
+- у статических шрифтов (`fmt_txt`) в LVGL9 **нет кэша глифов**: битмап
+  читается из flash при каждой отрисовке. Кэши есть только у `tiny_ttf`
+  (по умолчанию 256 глифов) и `freetype`.
+- декодирование сжатого глифа делает `lv_malloc(w)` (и второй — при
+  XOR-префильтре) на каждый глиф, т.е. лишние аллокации в кадре.
+
+### Если набор не влезает в `.rodata`
+
+Вариант, который Espressif показывает в своих примерах — **binfont**: тот же
+`lv_font_conv`, но файл в раздел, и загрузка в рантайме
+(`esp-iot-solution/examples/display/gui/lvgl_fs_assets`):
+
+```bash
+npx --yes lv_font_conv --font ttf/DejaVuSansMono.ttf \
+    --size 24 --bpp 4 --format bin --no-compress \
+    -r 0x20-0x7F -r 0x410-0x44F -r 0x401 -r 0x451 \
+    -o lvgl/lv_font_mono_24.bin
+```
+
+```c
+lv_font_t * f = lv_binfont_create("A:/storage/lv_font_mono_24.bin");
+```
+
+Другие два: FreeType + `esp_mmap_assets` с отдельным разделом `fonts`
+(800 КБ в примере Espressif, путь вида `F:Name.ttf`) и `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`
+на P4 — переносит `.text`/`.rodata` в PSRAM; на P4 это часто **быстрее**,
+чем чтение flash (PSRAM HEX 200 МГц против quad flash 80 МГц, шины
+раздельные), но требует замера. Учитывайте, что mmap работает страницами
+по 64 КБ.
 
 ## Добавить другой шрифт
 

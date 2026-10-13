@@ -53,6 +53,7 @@
 #include "driver/i2c_master.h"
 #include "app_lcd.h"
 #include "sdkconfig.h"
+#include "esp_timer.h"
 #include "camos/touch.h"
 
 static const char *TAG = "camos_touch";
@@ -391,7 +392,7 @@ static int tp_read_short_points(touch_point_t *out, int max_out)
         const uint8_t *p = &buf[i * 6];
         int x = ((p[0] & 0x0F) << 8) | p[1];
         int y = ((p[2] & 0x0F) << 8) | p[3];
-        out[i] = (touch_point_t){ .x = x, .y = y, .id = 0 };
+        out[i] = (touch_point_t){ .x = x, .y = y, .id = 0, .raw_x = x, .raw_y = y };
     }
     return count;
 }
@@ -425,9 +426,13 @@ static int tp_read_gt911(touch_point_t *out, int max_out)
         if (i2c_master_transmit_receive(s_tp.dev, pts_reg, 2, pts, read_n * 8, 20) == ESP_OK) {
             for (int i = 0; i < read_n && i < max_out; i++) {
                 const uint8_t *p = &pts[i * 8];
-                out[i] = (touch_point_t){ .x = p[1] | (p[2] << 8),
-                                          .y = p[3] | (p[4] << 8),
-                                          .id = p[0] };
+                int rx = p[1] | (p[2] << 8);
+                int ry = p[3] | (p[4] << 8);
+                out[i] = (touch_point_t){ .x = rx,
+                                          .y = ry,
+                                          .id = p[0],
+                                          .raw_x = rx,
+                                          .raw_y = ry };
             }
             count = read_n;
         } else {
@@ -439,6 +444,85 @@ static int tp_read_gt911(touch_point_t *out, int max_out)
     uint8_t clear[3] = { 0x81, 0x4E, 0x00 };
     i2c_master_transmit(s_tp.dev, clear, 3, 20);
     return count;
+}
+
+/* --- Экстремумы и диагностика крайних точек тача -------------------------- */
+
+static touch_diag_extremes_t s_diag = {
+    .raw_min_x = 99999,
+    .raw_max_x = -1,
+    .raw_min_y = 99999,
+    .raw_max_y = -1,
+    .screen_min_x = 99999,
+    .screen_max_x = -1,
+    .screen_min_y = 99999,
+    .screen_max_y = -1,
+    .total_points = 0,
+};
+
+static int s_last_corner = -1;
+static int64_t s_last_corner_log_us = 0;
+
+static void tp_diag_process_point(int raw_x, int raw_y, int sc_x, int sc_y)
+{
+    s_diag.total_points++;
+    bool raw_updated = false;
+    bool sc_updated = false;
+
+    if (raw_x < s_diag.raw_min_x) { s_diag.raw_min_x = raw_x; raw_updated = true; }
+    if (raw_x > s_diag.raw_max_x) { s_diag.raw_max_x = raw_x; raw_updated = true; }
+    if (raw_y < s_diag.raw_min_y) { s_diag.raw_min_y = raw_y; raw_updated = true; }
+    if (raw_y > s_diag.raw_max_y) { s_diag.raw_max_y = raw_y; raw_updated = true; }
+
+    if (sc_x < s_diag.screen_min_x) { s_diag.screen_min_x = sc_x; sc_updated = true; }
+    if (sc_x > s_diag.screen_max_x) { s_diag.screen_max_x = sc_x; sc_updated = true; }
+    if (sc_y < s_diag.screen_min_y) { s_diag.screen_min_y = sc_y; sc_updated = true; }
+    if (sc_y > s_diag.screen_max_y) { s_diag.screen_max_y = sc_y; sc_updated = true; }
+
+    static int64_t s_last_touch_log_us = 0;
+    int64_t now = esp_timer_get_time();
+
+    if (raw_updated || sc_updated) {
+        ESP_LOGI(TAG, "крайние точки обновлены: raw X=[%d..%d], Y=[%d..%d] -> screen X=[%d..%d], Y=[%d..%d] (текущая: raw=(%d,%d) -> screen=(%d,%d))",
+                 s_diag.raw_min_x, s_diag.raw_max_x, s_diag.raw_min_y, s_diag.raw_max_y,
+                 s_diag.screen_min_x, s_diag.screen_max_x, s_diag.screen_min_y, s_diag.screen_max_y,
+                 raw_x, raw_y, sc_x, sc_y);
+    } else if (now - s_last_touch_log_us > 400000LL) {
+        s_last_touch_log_us = now;
+        ESP_LOGI(TAG, "касание: raw=(%d,%d) -> screen=(%d,%d) [экстремумы raw X=[%d..%d] Y=[%d..%d]]",
+                 raw_x, raw_y, sc_x, sc_y,
+                 s_diag.raw_min_x, s_diag.raw_max_x, s_diag.raw_min_y, s_diag.raw_max_y);
+    }
+
+    /* Детектирование попадания в углы экрана (зона 120x120 px) для наглядной проверки калибровки */
+    #define TP_CORNER_ZONE 120
+    int corner = -1;
+    const char *corner_name = NULL;
+
+    if (sc_x < TP_CORNER_ZONE && sc_y < TP_CORNER_ZONE) {
+        corner = 0;
+        corner_name = "ЛЕВЫЙ ВЕРХНИЙ (Top-Left)";
+    } else if (sc_x >= EXAMPLE_LCD_H_RES - TP_CORNER_ZONE && sc_y < TP_CORNER_ZONE) {
+        corner = 1;
+        corner_name = "ПРАВЫЙ ВЕРХНИЙ (Top-Right)";
+    } else if (sc_x < TP_CORNER_ZONE && sc_y >= EXAMPLE_LCD_V_RES - TP_CORNER_ZONE) {
+        corner = 2;
+        corner_name = "ЛЕВЫЙ НИЖНИЙ (Bottom-Left)";
+    } else if (sc_x >= EXAMPLE_LCD_H_RES - TP_CORNER_ZONE && sc_y >= EXAMPLE_LCD_V_RES - TP_CORNER_ZONE) {
+        corner = 3;
+        corner_name = "ПРАВЫЙ НИЖНИЙ (Bottom-Right)";
+    }
+
+    if (corner >= 0) {
+        if (corner != s_last_corner || (now - s_last_corner_log_us > 1000000LL)) {
+            s_last_corner = corner;
+            s_last_corner_log_us = now;
+            ESP_LOGI(TAG, "[ТАЧ УГОЛ] %s: raw=(%d,%d) -> screen=(%d,%d)",
+                     corner_name, raw_x, raw_y, sc_x, sc_y);
+        }
+    } else {
+        s_last_corner = -1;
+    }
 }
 
 int touch_poll(touch_point_t *out, int max_out)
@@ -478,6 +562,11 @@ int touch_poll(touch_point_t *out, int max_out)
 #endif
         out[i].x = tp_normalize(x, EXAMPLE_LCD_H_RES);
         out[i].y = tp_normalize(y, EXAMPLE_LCD_V_RES);
+        out[i].raw_x = raw_x;
+        out[i].raw_y = raw_y;
+
+        /* Диагностика крайних точек и углов экрана */
+        tp_diag_process_point(raw_x, raw_y, out[i].x, out[i].y);
 
         /* First touches at INFO: raw chip coords + screen coords, so the
          * boot log alone proves the whole chain works (or shows where it
@@ -509,4 +598,29 @@ void *touch_get_i2c_bus(void)
      * NULL when touch_init() never created a bus, in which case the audio
      * driver creates its own on the same pins. */
     return (void *)s_tp.bus;
+}
+
+void touch_diag_get_extremes(touch_diag_extremes_t *out)
+{
+    if (out != NULL) {
+        *out = s_diag;
+    }
+}
+
+void touch_diag_reset_extremes(void)
+{
+    s_diag = (touch_diag_extremes_t){
+        .raw_min_x = 99999,
+        .raw_max_x = -1,
+        .raw_min_y = 99999,
+        .raw_max_y = -1,
+        .screen_min_x = 99999,
+        .screen_max_x = -1,
+        .screen_min_y = 99999,
+        .screen_max_y = -1,
+        .total_points = 0,
+    };
+    s_last_corner = -1;
+    s_last_corner_log_us = 0;
+    ESP_LOGI(TAG, "статистика крайних точек тача сброшена");
 }

@@ -3,6 +3,7 @@ set(srcs "main.c" "app_lcd.c" "app_overlay.c"
           "net/app_eth.c" "net/app_net.c"
           "net/log_server.c" "net/speed_test.c" "net/wifi_mgr.c"
           "browser/web_client.c" "browser/html_text.c" "browser/browser.c"
+          "browser/touch_calib.c"
           "media/media_audio.c" "media/media_player.c" "media/pstats.c"
           "media/sdcard.c")
 
@@ -16,6 +17,7 @@ idf_component_register(SRCS "${srcs}"
                            esp_timer
                            esp_pm
                            esp_lcd
+                           espressif__esp_lcd_jd9365
                            esp_system
                            lwip
                            nvs_flash

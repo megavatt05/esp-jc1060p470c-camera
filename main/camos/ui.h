@@ -84,6 +84,14 @@ void ui_rrect_frame(uint16_t *fb, int fb_w, int fb_h,
 void ui_circle(uint16_t *fb, int fb_w, int fb_h,
                int cx, int cy, int r, uint16_t color);
 
+/* Circle outline (1 px thick) */
+void ui_circle_frame(uint16_t *fb, int fb_w, int fb_h,
+                     int cx, int cy, int r, uint16_t color);
+
+/* Bresenham line with clipping */
+void ui_line(uint16_t *fb, int fb_w, int fb_h,
+             int x0, int y0, int x1, int y1, uint16_t color);
+
 /* Card: panel fill + border. pressed=true brightens the fill */
 void ui_card(uint16_t *fb, int fb_w, int fb_h,
              int x0, int y0, int x1, int y1, bool pressed);

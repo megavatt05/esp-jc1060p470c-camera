@@ -64,6 +64,7 @@ esp_err_t web_get(const char *url, const char *extra_cookie,
         .timeout_ms = 20000,
         .max_redirection_count = 10,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .skip_cert_common_name_check = true,
         .keep_alive_enable = false,
         .user_agent = WEB_CLIENT_UA,
     };

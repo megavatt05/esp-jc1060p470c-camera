@@ -1,5 +1,7 @@
 build/
 sdkconfig
-managed_components/
-build/
 sdkconfig.old
+managed_components/
+*.log
+*.ps1
+scratch/

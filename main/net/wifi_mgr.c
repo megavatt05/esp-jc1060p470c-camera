@@ -242,6 +242,13 @@ esp_err_t wifi_mgr_init(void)
     creds_load();
     M.ready = true;
 
+    if (strcmp(CONFIG_EB_WIFI_SSID, "myssid") != 0 && CONFIG_EB_WIFI_SSID[0]) {
+        if (strcmp(M.ssid, CONFIG_EB_WIFI_SSID) != 0) {
+            ESP_LOGI(TAG, "Новая сеть из конфигурации: '%s' (в NVS была '%s')",
+                     CONFIG_EB_WIFI_SSID, M.ssid);
+            return wifi_mgr_connect(CONFIG_EB_WIFI_SSID, CONFIG_EB_WIFI_PASSWORD);
+        }
+    }
     if (M.ssid[0]) {
         return wifi_mgr_connect(M.ssid, M.pass);
     }
