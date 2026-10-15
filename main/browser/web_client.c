@@ -64,7 +64,7 @@ esp_err_t web_get(const char *url, const char *extra_cookie,
         .timeout_ms = 20000,
         .max_redirection_count = 10,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .skip_cert_common_name_check = true,
+        .skip_cert_common_name_check = false,
         .keep_alive_enable = false,
         .user_agent = WEB_CLIENT_UA,
     };
@@ -95,8 +95,9 @@ esp_err_t web_get(const char *url, const char *extra_cookie,
         return err;
     }
 
-    int status = esp_http_client_fetch_headers(client);
-    ESP_LOGI(TAG, "GET %s -> %d", url, status);
+    int64_t content_len = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "GET %s -> HTTP %d (content_length: %lld)", url, status, (long long)content_len);
 
     size_t total = 0;
     while (total < cap) {
@@ -112,6 +113,7 @@ esp_err_t web_get(const char *url, const char *extra_cookie,
         total += (size_t)n;
     }
     buf[total] = '\0';
+    ESP_LOGI(TAG, "body downloaded: %u bytes", (unsigned)total);
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);

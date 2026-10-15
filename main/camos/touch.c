@@ -525,9 +525,34 @@ static void tp_diag_process_point(int raw_x, int raw_y, int sc_x, int sc_y)
     }
 }
 
+static touch_point_t s_injected_pt;
+static int s_injected_frames = 0;
+
+void touch_inject(int x, int y)
+{
+    s_injected_pt.x = (x < 0) ? 0 : (x >= EXAMPLE_LCD_H_RES ? EXAMPLE_LCD_H_RES - 1 : x);
+    s_injected_pt.y = (y < 0) ? 0 : (y >= EXAMPLE_LCD_V_RES ? EXAMPLE_LCD_V_RES - 1 : y);
+    s_injected_pt.raw_x = s_injected_pt.x;
+    s_injected_pt.raw_y = s_injected_pt.y;
+    s_injected_pt.id = 0;
+    s_injected_frames = 2; /* 2 кадра опроса: нажатие + удержание перед отпусканием */
+    ESP_LOGI("TOUCH_HIL", "📥 Инъекция тача (UART HIL): x=%d, y=%d", s_injected_pt.x, s_injected_pt.y);
+}
+
 int touch_poll(touch_point_t *out, int max_out)
 {
-    if (s_tp.chip == TOUCH_CHIP_NONE || out == NULL || max_out <= 0) {
+    if (out == NULL || max_out <= 0) {
+        return 0;
+    }
+
+    /* Приоритет виртуальной инъекции для автотестов */
+    if (s_injected_frames > 0) {
+        s_injected_frames--;
+        out[0] = s_injected_pt;
+        return 1;
+    }
+
+    if (s_tp.chip == TOUCH_CHIP_NONE) {
         return 0;
     }
 

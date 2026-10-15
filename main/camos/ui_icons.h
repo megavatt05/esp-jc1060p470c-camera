@@ -420,6 +420,50 @@ static const ui_icon_t __attribute__((unused)) ui_icon_home = {
     }
 };
 
+/* WIFI */
+static const ui_icon_t __attribute__((unused)) ui_icon_wifi = {
+    .row = {
+        0x0000,
+        0x07E0,
+        0x1818,
+        0x2004,
+        0x0000,
+        0x03C0,
+        0x0C30,
+        0x1008,
+        0x0000,
+        0x0180,
+        0x0660,
+        0x0000,
+        0x0180,
+        0x0180,
+        0x0000,
+        0x0000,
+    }
+};
+
+/* WIFI OFF */
+static const ui_icon_t __attribute__((unused)) ui_icon_wifi_off = {
+    .row = {
+        0x8000,
+        0xC7E0,
+        0x7818,
+        0x3804,
+        0x1C00,
+        0x0FE0,
+        0x0E70,
+        0x1338,
+        0x01C0,
+        0x01E0,
+        0x06F0,
+        0x0038,
+        0x019C,
+        0x018E,
+        0x0007,
+        0x0003,
+    }
+};
+
 #ifdef __cplusplus
 }
 #endif

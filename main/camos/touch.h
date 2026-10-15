@@ -45,6 +45,14 @@ esp_err_t touch_init(void);
  */
 int touch_poll(touch_point_t *out, int max_out);
 
+/**
+ * @brief Виртуальная инъекция точки касания (эмуляция действий пользователя через UART/HIL).
+ *
+ * @param x Экранная координата X (0..1023)
+ * @param y Экранная координата Y (0..599)
+ */
+void touch_inject(int x, int y);
+
 #define TOUCH_MAX_POINTS 5
 
 /** @brief Chip name for the status bar: "GT911"/"FT5x06"/"CST816"/"none" */

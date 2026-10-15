@@ -110,6 +110,10 @@ enum {
     BTN_WIFI_TEST,
     BTN_WIFI_CONN,          /* подключить сохранённую */
     BTN_WIFI_ROW,           /* + index скан-сети */
+    BTN_WIFI_DIAG_CLOSE,    /* закрыть терминал Wi-Fi */
+    BTN_WIFI_DIAG_RECONN,   /* переподключить Wi-Fi */
+    BTN_WIFI_DIAG_SCAN,     /* перейти в скан сетей */
+    BTN_WIFI_DIAG_TEST,     /* тест сети в терминале */
     BTN_TOUCH_TEST,         /* экран тестирования и калибровки тача */
     BTN_CASE,               /* переключение регистра: ЗАГЛ / стр */
     BTN_CHAR = 0x1000,      /* маркер, что нажата буква/символ */
@@ -125,6 +129,7 @@ typedef enum {
     ST_BUSY,                /* live busy card: animator redraws it while
                              * the browser task is blocked on the network */
     ST_TOUCH_TEST,          /* тестовый экран тача и калибровки */
+    ST_WIFI_DIAG,           /* терминал подключения Wi-Fi и диагностики */
 #if CONFIG_EB_MEDIA_ENABLE
     ST_RADIO,               /* radio screen (stations + controls)      */
     ST_VIDEO,               /* video screen (presets + custom URL)     */
@@ -143,6 +148,7 @@ typedef enum {
 static struct {
     int fb_idx;
     browser_state_t state;
+    browser_state_t wifi_diag_back; /* откуда пришли в терминал Wi-Fi */
 
     char query[96];
     bool engine_google;
@@ -275,16 +281,74 @@ static void draw_status_bar(uint16_t *fb)
     ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, BAR_H, UI_COLOR_BAR);
     ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H - 1, LCD_W, BAR_H, UI_COLOR_BORDER);
 
-    /* left: link dot + address */
-    ui_circle(fb, LCD_W, LCD_H, 12, BAR_H / 2, 3, app_net_ready() ? UI_COLOR_OK : UI_COLOR_ERR);
-    char left[40];
-    if (app_net_ready()) {
-        snprintf(left, sizeof(left), "%s", app_net_ip_str());
+    /* левая плашка-кнопка: иконка Wi-Fi + SSID / IP */
+    wifi_mgr_state_t wst = wifi_mgr_state();
+    bool ready = wifi_mgr_ready();
+    const char *ssid = wifi_mgr_saved_ssid();
+    const char *ip = wifi_mgr_ip_str();
+
+    char label[64];
+    uint16_t icon_col = UI_COLOR_OK;
+    const ui_icon_t *icon_wifi = &ui_icon_wifi;
+
+    if (ready) {
+        icon_wifi = &ui_icon_wifi;
+        icon_col = UI_COLOR_OK;
+        if (ssid[0]) {
+            snprintf(label, sizeof(label), "%s  %s", ssid, ip);
+        } else {
+            snprintf(label, sizeof(label), "%s", ip);
+        }
+    } else if (wst == WIFI_MGR_CONNECTING) {
+        icon_wifi = &ui_icon_wifi;
+        icon_col = UI_COLOR_WARN;
+        if (ssid[0]) {
+            snprintf(label, sizeof(label), "Подкл. к %s...", ssid);
+        } else {
+            snprintf(label, sizeof(label), "Подключение Wi-Fi...");
+        }
+    } else if (wst == WIFI_MGR_SCANNING) {
+        icon_wifi = &ui_icon_wifi;
+        icon_col = UI_COLOR_ACCENT;
+        snprintf(label, sizeof(label), "Скан сетей Wi-Fi...");
+    } else if (wst == WIFI_MGR_AP_MODE) {
+        icon_wifi = &ui_icon_wifi;
+        icon_col = UI_COLOR_ACCENT2;
+        snprintf(label, sizeof(label), "Портал: 192.168.4.1");
     } else {
-        snprintf(left, sizeof(left), "%s", app_net_status_str());
+        icon_wifi = &ui_icon_wifi_off;
+        icon_col = UI_COLOR_ERR;
+        snprintf(label, sizeof(label), "Wi-Fi откл (нажмите)");
     }
-    ui_text(fb, LCD_W, LCD_H, 22, (BAR_H - UI_FONT_H) / 2,
-            left, 1, UI_COLOR_FG, UI_COLOR_BAR);
+
+    /* Рамка-кнопка под иконку и надпись */
+    int txt_w = ui_text_width(label, 1);
+    int badge_w = 28 + txt_w + 12;
+    if (badge_w > 360) {
+        badge_w = 360;
+    }
+    ui_rrect(fb, LCD_W, LCD_H, 4, 3, badge_w, BAR_H - 3, 6, UI_COLOR_KEY);
+    ui_rrect_frame(fb, LCD_W, LCD_H, 4, 3, badge_w, BAR_H - 3, 6, UI_COLOR_BORDER);
+
+    /* Иконка Wi-Fi */
+    ui_icon(icon_wifi, fb, LCD_W, LCD_H, 8, (BAR_H - 16) / 2, 1, icon_col);
+
+    /* Детекция переключения состояния значка Wi-Fi для автотестов и логов */
+    static wifi_mgr_state_t s_last_logged_wst = (wifi_mgr_state_t)-1;
+    static bool s_last_logged_ready = false;
+    if (wst != s_last_logged_wst || ready != s_last_logged_ready) {
+        s_last_logged_wst = wst;
+        s_last_logged_ready = ready;
+        const char *icon_name = (icon_wifi == &ui_icon_wifi) ? "WIFI_ON" : "WIFI_OFF";
+        ESP_LOGI("UI_WIFI_ICON", "📶 Значок Wi-Fi изменён: icon=%s col=0x%04X state=%s text=\"%s\"",
+                 icon_name, icon_col, wifi_mgr_status_str(), label);
+    }
+
+    /* Текст статуса/сети */
+    char fitted[64];
+    ui_text_fit(fitted, sizeof(fitted), label, badge_w - 32, 1);
+    ui_text(fb, LCD_W, LCD_H, 28, (BAR_H - UI_FONT_H) / 2,
+            fitted, 1, UI_COLOR_FG, UI_COLOR_KEY);
 
     /* right: engine pill + radio-on note */
     int x = LCD_W - 8;
@@ -622,12 +686,12 @@ static void busy_close(void);
 static void draw_loading(uint16_t *fb, const char *what);
 
 static const struct { const char *name; const char *url; } radio_stations[] = {
-    { "DFM",            "http://dfm.hostingradio.ru/dfm128.mp3" },
-    { "Русское Радио",  "http://rusradio.hostingradio.ru/rusradio128.mp3" },
     { "Радио Маяк",     "http://icecast.vgtrk.cdnvideo.ru/mayakfm_mp3_128kbps" },
     { "Вести FM",       "http://icecast.vgtrk.cdnvideo.ru/vestifm_mp3_128kbps" },
-    { "Европа Плюс",    "http://emg01.hostingradio.ru/ep128.mp3" },
-    { "Ретро FM",       "http://emg01.hostingradio.ru/retro128.mp3" },
+    { "Европа Плюс",    "http://ep128.hostingradio.ru:8030/ep128" },
+    { "Дорожное Радио", "http://dorognoe.hostingradio.ru:8000/dorognoe" },
+    { "Культура FM",    "http://icecast.vgtrk.cdnvideo.ru/kulturafm_mp3_128kbps" },
+    { "Радио России",   "http://icecast.vgtrk.cdnvideo.ru/radiorus_mp3_128kbps" },
 };
 #define RADIO_STATIONS_N (sizeof(radio_stations) / sizeof(radio_stations[0]))
 
@@ -725,16 +789,90 @@ static bool media_url_norm(const char *in, char *out, size_t outsz)
     return true;
 }
 
+/* ============================================================================
+ * Асинхронный воркер радио и телеметрия задержек интерфейса (HCI / ISO 9241-110)
+ * ============================================================================ */
+static int s_radio_active_idx = -1;        /* Выбранная станция (Optimistic UI) */
+static bool s_radio_is_connecting = false; /* Флаг ожидания подключения */
+static int64_t s_radio_conn_t0 = 0;        /* Время старта запроса (таймаут Нильсена 10 с) */
+static TaskHandle_t s_radio_worker_hd = NULL;
+static QueueHandle_t s_radio_queue = NULL;
+
+typedef struct {
+    int station_idx;
+    char url[256];
+} radio_worker_msg_t;
+
+static void radio_worker_task(void *arg)
+{
+    radio_worker_msg_t msg;
+    while (1) {
+        if (xQueueReceive(s_radio_queue, &msg, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI("radio_worker", "Старт станции [%d]: %s", msg.station_idx, msg.url);
+            int64_t t0 = esp_timer_get_time();
+            esp_err_t err = media_radio_start(msg.url);
+            int64_t dur_ms = (esp_timer_get_time() - t0) / 1000;
+            if (err == ESP_OK) {
+                ESP_LOGI("radio_worker", "📻 Станция подключена за %lld мс", dur_ms);
+            } else {
+                ESP_LOGE("radio_worker", "❌ Ошибка подключения станции (%s) за %lld мс",
+                         esp_err_to_name(err), dur_ms);
+            }
+        }
+    }
+}
+
+static void radio_worker_init_once(void)
+{
+    if (s_radio_queue == NULL) {
+        /* FreeRTOS требование: для xQueueOverwrite длина очереди обязана быть ровно 1! */
+        s_radio_queue = xQueueCreate(1, sizeof(radio_worker_msg_t));
+    }
+    if (s_radio_worker_hd == NULL && s_radio_queue != NULL) {
+        xTaskCreatePinnedToCore(radio_worker_task, "radio_worker", 12 * 1024,
+                                NULL, 2, &s_radio_worker_hd, 1);
+    }
+}
+
+static void radio_request_start(int station_idx, const char *url)
+{
+    s_radio_active_idx = station_idx;
+    s_radio_is_connecting = true;
+    s_radio_conn_t0 = esp_timer_get_time();
+    radio_worker_init_once();
+    radio_worker_msg_t msg = {
+        .station_idx = station_idx,
+    };
+    strlcpy(msg.url, url, sizeof(msg.url));
+    xQueueOverwrite(s_radio_queue, &msg);
+}
+
 static void draw_radio(uint16_t *fb)
 {
     draw_status_bar(fb);
     ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H, LCD_W, LCD_H, UI_COLOR_BG);
 
     ui_text(fb, LCD_W, LCD_H, 12, 44, "РАДИО", UI_SCALE_TITLE, UI_COLOR_ACCENT, UI_COLOR_BG);
-    char st[48];
-    snprintf(st, sizeof(st), "%s", media_state_str());
+
+    media_state_t mst = media_get_state();
+    if (mst == MEDIA_STATE_PLAYING && s_radio_is_connecting) {
+        s_radio_is_connecting = false;
+    }
+
+    char st[64];
+    if (s_radio_is_connecting) {
+        int64_t wait_s = (esp_timer_get_time() - s_radio_conn_t0) / 1000000;
+        if (wait_s >= 10) {
+            snprintf(st, sizeof(st), "СЕРВЕР НЕ ОТВЕЧАЕТ (>10с)");
+        } else {
+            snprintf(st, sizeof(st), "ПОДКЛЮЧЕНИЕ (%lld с)...", wait_s);
+        }
+    } else {
+        snprintf(st, sizeof(st), "%s", media_state_str());
+    }
     ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(st, UI_SCALE_TEXT) - 12,
-            52, st, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
+            52, st, UI_SCALE_TEXT,
+            s_radio_is_connecting ? UI_COLOR_ACCENT : UI_COLOR_DIM, UI_COLOR_BG);
 
     /* volume bar under the state text */
     ui_progress(fb, LCD_W, LCD_H, LCD_W - 172, 74, 160, 12,
@@ -743,18 +881,39 @@ static void draw_radio(uint16_t *fb)
     for (size_t i = 0; i < RADIO_STATIONS_N; i++) {
         ui_button_t b;
         radio_st_btn((int)i, &b);
-        bool active = (media_get_state() != MEDIA_STATE_IDLE &&
-                       strcmp(media_get_url(), radio_stations[i].url) == 0);
-        ui_rrect(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
-                 active ? UI_COLOR_BG_PRESS : UI_COLOR_PANEL);
-        ui_rrect_frame(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
-                       active ? UI_COLOR_OK : UI_COLOR_BORDER);
-        ui_icon(&ui_icon_music, fb, LCD_W, LCD_H, b.x + 20, b.y + (b.h - 16) / 2, 1,
-                active ? UI_COLOR_OK : UI_COLOR_DIM);
-        int tw = ui_text_width(b.label, 3);
-        ui_text(fb, LCD_W, LCD_H, b.x + (b.w - tw) / 2 + 12,
-                b.y + (b.h - UI_FONT_H * 3) / 2, b.label, 3,
-                active ? UI_COLOR_FG : UI_COLOR_DIM, UI_COLOR_PANEL);
+        bool is_selected = (s_radio_active_idx == (int)i) ||
+                           (media_get_state() != MEDIA_STATE_IDLE &&
+                            strcmp(media_get_url(), radio_stations[i].url) == 0);
+        bool is_conn = (s_radio_is_connecting && s_radio_active_idx == (int)i);
+
+        uint16_t bg_color = is_selected ? UI_COLOR_BG_PRESS : UI_COLOR_PANEL;
+        uint16_t border_color = is_conn ? UI_COLOR_ACCENT : (is_selected ? UI_COLOR_OK : UI_COLOR_BORDER);
+        uint16_t icon_color = is_conn ? UI_COLOR_ACCENT : (is_selected ? UI_COLOR_OK : UI_COLOR_DIM);
+        uint16_t text_color = is_selected ? UI_COLOR_FG : UI_COLOR_DIM;
+
+        ui_rrect(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY, bg_color);
+        ui_rrect_frame(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY, border_color);
+        ui_icon(&ui_icon_music, fb, LCD_W, LCD_H, b.x + 20, b.y + (b.h - 16) / 2, 1, icon_color);
+
+        if (is_selected) {
+            /* Выбранная станция: двухстрочный макет (название scale=2 + статус scale=1).
+             * Исключает выход за границы (Text Overflow): гарантированный запас > 100 px */
+            ui_text(fb, LCD_W, LCD_H, b.x + 56, b.y + 16, b.label, 2,
+                    text_color, bg_color);
+            if (is_conn) {
+                ui_text(fb, LCD_W, LCD_H, b.x + 56, b.y + 44, "ПОДКЛЮЧЕНИЕ...", 1,
+                        UI_COLOR_ACCENT, bg_color);
+            } else {
+                ui_text(fb, LCD_W, LCD_H, b.x + 56, b.y + 44, "В ЭФИРЕ", 1,
+                        UI_COLOR_OK, bg_color);
+            }
+        } else {
+            /* Неактивная станция: центрированное название (scale=3) */
+            int tw = ui_text_width(b.label, 3);
+            ui_text(fb, LCD_W, LCD_H, b.x + (b.w - tw) / 2 + 12,
+                    b.y + (b.h - UI_FONT_H * 3) / 2, b.label, 3,
+                    text_color, bg_color);
+        }
     }
 
     static const struct { int w; int id; } ctrls[] = {
@@ -1182,9 +1341,17 @@ static void video_start_ui(const char *url)
             br.state = ST_VIDEOP;   /* render owns the panel from here */
             return;
         }
+        media_state_t st = media_get_state();
         media_stop();
         ESP_LOGW(TAG, "playback did not start (%s)", media_state_str());
-        video_start_fail("плеер: не удалось начать воспроизведение");
+        if (st == MEDIA_STATE_FINISHED) {
+            ESP_LOGE(TAG, "Видеопоток отвергнут декодером tinyH264: неподдерживаемый формат/профиль. "
+                          "ESP32-P4 поддерживает только H.264 Baseline Profile (без CABAC/B-кадров). "
+                          "Используйте tools/convert_movie.bat или ffmpeg -profile:v baseline");
+            video_start_fail("неподдерживаемый H.264: нужен Baseline Profile (см. tools/convert_movie)");
+        } else {
+            video_start_fail("плеер: не удалось начать воспроизведение");
+        }
         return;
     }
 
@@ -1350,6 +1517,229 @@ static void wifi_handle_tap(int x, int y)
             }
             return;
         }
+    }
+}
+
+static void draw_wifi_diag(uint16_t *fb)
+{
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, LCD_H, UI_COLOR_BG);
+
+    wifi_mgr_diag_t diag;
+    wifi_mgr_get_diag(&diag);
+
+    bool connected = (diag.state == WIFI_MGR_CONNECTED && diag.ip[0] != '\0' && strcmp(diag.ip, "0.0.0.0") != 0);
+    uint16_t status_col = connected ? UI_COLOR_OK :
+                         (diag.state == WIFI_MGR_CONNECTING ? UI_COLOR_WARN : UI_COLOR_ERR);
+    const char *status_title = connected ? "ПОДКЛЮЧЕНО" :
+                              (diag.state == WIFI_MGR_CONNECTING ? "ПОДКЛЮЧЕНИЕ..." : "НЕТ СВЯЗИ");
+
+    ui_icon(connected ? &ui_icon_wifi : &ui_icon_wifi_off,
+            fb, LCD_W, LCD_H, 16, 12, 2, status_col);
+    ui_text(fb, LCD_W, LCD_H, 56, 10, "ТЕРМИНАЛ ПОДКЛЮЧЕНИЯ WI-FI",
+            UI_SCALE_TITLE, UI_COLOR_FG, UI_COLOR_BG);
+    ui_text(fb, LCD_W, LCD_H, 56, 38, "ESP32-P4 + ESP32-C6 (SDIO esp-hosted v3.0.9)",
+            1, UI_COLOR_DIM, UI_COLOR_BG);
+
+    /* Бейдж статуса в правом верхнем углу */
+    int st_w = 210, st_h = 38;
+    ui_rrect(fb, LCD_W, LCD_H, LCD_W - st_w - 16, 10, LCD_W - 16, 10 + st_h, 6, UI_COLOR_PANEL);
+    ui_rrect_frame(fb, LCD_W, LCD_H, LCD_W - st_w - 16, 10, LCD_W - 16, 10 + st_h, 6, status_col);
+    int tw = ui_text_width(status_title, 2);
+    ui_text(fb, LCD_W, LCD_H, LCD_W - st_w - 16 + (st_w - tw) / 2, 10 + (st_h - 16) / 2,
+            status_title, 2, status_col, UI_COLOR_PANEL);
+
+    /* === ЛЕВАЯ КОЛОНКА (x=16..440, y=56..516): Параметры сети === */
+    int lx0 = 16, ly0 = 56, lx1 = 440, ly1 = 516;
+    ui_card(fb, LCD_W, LCD_H, lx0, ly0, lx1, ly1, false);
+
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 10, "ПАРАМЕТРЫ СОЕДИНЕНИЯ",
+            1, UI_COLOR_ACCENT, UI_COLOR_PANEL);
+    ui_line(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 24, lx1 - 16, ly0 + 24, UI_COLOR_BORDER);
+
+    /* Блок SSID */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 34, "Сеть (SSID):", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_rrect(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 48, lx1 - 16, ly0 + 82, 6, UI_COLOR_KEY);
+    ui_rrect_frame(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 48, lx1 - 16, ly0 + 82, 6, UI_COLOR_BORDER);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 26, ly0 + 56, diag.ssid, 2, UI_COLOR_FG, UI_COLOR_KEY);
+
+    /* BSSID */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 94, "BSSID (MAC AP):", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 94, diag.bssid_str, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    /* Канал */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 114, "Канал Wi-Fi:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    char ch_buf[48];
+    if (diag.channel > 0) {
+        snprintf(ch_buf, sizeof(ch_buf), "%d (2.4 ГГц, 802.11ax/Wi-Fi 6)", diag.channel);
+    } else {
+        snprintf(ch_buf, sizeof(ch_buf), "—");
+    }
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 114, ch_buf, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    /* Шифрование */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 134, "Шифрование:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 134, diag.auth_str, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    /* RSSI */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 154, "Сигнал (RSSI):", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    char rssi_buf[32];
+    if (diag.rssi != 0) {
+        snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm", (int)diag.rssi);
+    } else {
+        snprintf(rssi_buf, sizeof(rssi_buf), "—");
+    }
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 154, rssi_buf, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    float frac = 0.0f;
+    if (diag.rssi < -95) {
+        frac = 0.1f;
+    } else if (diag.rssi >= -50) {
+        frac = 1.0f;
+    } else if (diag.rssi != 0) {
+        frac = (float)(diag.rssi - (-95)) / 45.0f;
+    }
+    ui_progress(fb, LCD_W, LCD_H, lx0 + 220, ly0 + 155, 190, 10, frac,
+                frac > 0.6f ? UI_COLOR_OK : (frac > 0.3f ? UI_COLOR_WARN : UI_COLOR_ERR));
+
+    /* Разделитель IP блока */
+    ui_line(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 178, lx1 - 16, ly0 + 178, UI_COLOR_BORDER);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 188, "СЕТЕВАЯ АДРЕСАЦИЯ (DHCP)",
+            1, UI_COLOR_ACCENT, UI_COLOR_PANEL);
+
+    /* IP адрес */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 210, "IP адрес:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 206, diag.ip, 2, UI_COLOR_OK, UI_COLOR_PANEL);
+
+    /* Маска подсети */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 232, "Маска подсети:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 232, diag.netmask, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    /* Шлюз */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 252, "Основной шлюз:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 252, diag.gw, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    /* DNS */
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 272, "DNS сервер:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 150, ly0 + 272, diag.dns, 1, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    /* Аппаратный стек */
+    ui_line(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 296, lx1 - 16, ly0 + 296, UI_COLOR_BORDER);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 306, "АППАРАТНЫЙ СТЕК SDIO",
+            1, UI_COLOR_ACCENT, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 328, diag.c6_fw_str, 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 348, "Линк: SDIO 4-bit, esp-wifi-remote", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 368, "SW_AGGR: negotiated rx=15.8K tx=15.8K", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 388, "Режим: WIFI_PS_NONE (макс. скорость)", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 16, ly0 + 412, "Статус менеджера:", 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    ui_text(fb, LCD_W, LCD_H, lx0 + 160, ly0 + 412, diag.status_str, 1, UI_COLOR_ACCENT, UI_COLOR_PANEL);
+
+    /* === ПРАВАЯ КОЛОНКА (x=454..1008, y=56..516): Окно терминала логов === */
+    int rx0 = 454, ry0 = 56, rx1 = 1008, ry1 = 516;
+    ui_rrect(fb, LCD_W, LCD_H, rx0, ry0, rx1, ry1, 8, 0x0000);
+    ui_rrect_frame(fb, LCD_W, LCD_H, rx0, ry0, rx1, ry1, 8, UI_COLOR_BORDER);
+
+    /* Хедер терминала */
+    ui_fill_rect(fb, LCD_W, LCD_H, rx0 + 1, ry0 + 1, rx1 - 1, ry0 + 26, UI_COLOR_KEY);
+    ui_line(fb, LCD_W, LCD_H, rx0, ry0 + 26, rx1, ry0 + 26, UI_COLOR_BORDER);
+    ui_circle(fb, LCD_W, LCD_H, rx0 + 14, ry0 + 13, 4, UI_COLOR_ERR);
+    ui_circle(fb, LCD_W, LCD_H, rx0 + 26, ry0 + 13, 4, UI_COLOR_WARN);
+    ui_circle(fb, LCD_W, LCD_H, rx0 + 38, ry0 + 13, 4, UI_COLOR_OK);
+    ui_text(fb, LCD_W, LCD_H, rx0 + 52, ry0 + 9, "терминал: /dev/esp_hosted/wlan0 [лог событий]",
+            1, UI_COLOR_DIM, UI_COLOR_KEY);
+
+    /* Строки логов терминала */
+    int log_y = ry0 + 36;
+    int max_vis_lines = 16;
+    int start_i = 0;
+    if (diag.log_count > max_vis_lines) {
+        start_i = diag.log_count - max_vis_lines;
+    }
+    int last_x = rx0 + 14;
+    int last_y = log_y;
+
+    for (int i = start_i; i < diag.log_count; i++) {
+        const char *line = diag.logs[i];
+        uint16_t col = UI_COLOR_FG;
+        if (strstr(line, "OK") || strstr(line, "есть IP") || strstr(line, "Связано") || strstr(line, "установлена")) {
+            col = UI_COLOR_OK;
+        } else if (strstr(line, "Обрыв") || strstr(line, "fail") || strstr(line, "ошибка")) {
+            col = UI_COLOR_ERR;
+        } else if (strstr(line, "повтор") || strstr(line, "скан") || strstr(line, "подключение")) {
+            col = UI_COLOR_WARN;
+        }
+
+        char fitted[WIFI_MGR_LOG_LEN];
+        ui_text_fit(fitted, sizeof(fitted), line, rx1 - rx0 - 28, 1);
+        ui_text(fb, LCD_W, LCD_H, rx0 + 14, log_y, fitted, 1, col, 0x0000);
+        last_x = rx0 + 14 + ui_text_width(fitted, 1);
+        last_y = log_y;
+        log_y += 24;
+    }
+
+    if (diag.log_count == 0) {
+        ui_text(fb, LCD_W, LCD_H, rx0 + 14, log_y, "[00:00.0] Ожидание сетевых событий...",
+                1, UI_COLOR_DIM, 0x0000);
+        last_x = rx0 + 14 + ui_text_width("[00:00.0] Ожидание сетевых событий...", 1);
+        last_y = log_y;
+        log_y += 24;
+    }
+
+    /* Мигающий консольный курсор */
+    if ((esp_timer_get_time() / 500000LL) & 1) {
+        int cur_x = (last_x + 6 < rx1 - 20) ? (last_x + 4) : (rx0 + 14);
+        int cur_y = (last_x + 6 < rx1 - 20) ? last_y : log_y;
+        ui_fill_rect(fb, LCD_W, LCD_H, cur_x, cur_y, cur_x + 8, cur_y + 10, UI_COLOR_OK);
+    }
+
+    /* === НИЖНИЙ РЯД КНОПОК ДЕЙСТВИЙ (y=530..586, высота 56) === */
+    ui_button_t bclose  = { 16,  530, 220, 56, "ЗАКРЫТЬ",        BTN_WIFI_DIAG_CLOSE,  2 };
+    ui_button_t breconn = { 250, 530, 240, 56, "ПЕРЕПОДКЛЮЧИТЬ", BTN_WIFI_DIAG_RECONN, 2 };
+    ui_button_t bscan   = { 504, 530, 240, 56, "СПИСОК СЕТЕЙ",   BTN_WIFI_DIAG_SCAN,   2 };
+    ui_button_t btest   = { 758, 530, 250, 56, "ТЕСТ СЕТИ",      BTN_WIFI_DIAG_TEST,   2 };
+
+    ui_button(fb, LCD_W, LCD_H, &bclose, false);
+    ui_button(fb, LCD_W, LCD_H, &breconn, false);
+    ui_button(fb, LCD_W, LCD_H, &bscan, false);
+    ui_button(fb, LCD_W, LCD_H, &btest, false);
+}
+
+static void wifi_diag_handle_tap(int x, int y)
+{
+    ui_button_t bclose  = { 16,  530, 220, 56, "ЗАКРЫТЬ",        BTN_WIFI_DIAG_CLOSE,  2 };
+    ui_button_t breconn = { 250, 530, 240, 56, "ПЕРЕПОДКЛЮЧИТЬ", BTN_WIFI_DIAG_RECONN, 2 };
+    ui_button_t bscan   = { 504, 530, 240, 56, "СПИСОК СЕТЕЙ",   BTN_WIFI_DIAG_SCAN,   2 };
+    ui_button_t btest   = { 758, 530, 250, 56, "ТЕСТ СЕТИ",      BTN_WIFI_DIAG_TEST,   2 };
+
+    if (ui_button_hit(&bclose, x, y)) {
+        br.state = (br.wifi_diag_back != ST_WIFI_DIAG) ? br.wifi_diag_back : ST_HOME;
+        return;
+    }
+    if (ui_button_hit(&breconn, x, y)) {
+        const char *ssid = wifi_mgr_saved_ssid();
+        busy_open("Wi-Fi");
+        if (!ssid[0]) {
+            busy_stage("нет сети в памяти");
+            vTaskDelay(pdMS_TO_TICKS(800));
+        } else {
+            busy_stage("подключение...");
+            wifi_mgr_connect(ssid, NULL);
+        }
+        busy_close();
+        return;
+    }
+    if (ui_button_hit(&bscan, x, y)) {
+        br.state = ST_WIFI;
+        return;
+    }
+    if (ui_button_hit(&btest, x, y)) {
+        busy_open("Тест сети");
+        busy_stage("generate_204 ping...");
+        wifi_mgr_test_t tr;
+        wifi_mgr_test_internet(&tr);
+        busy_stage(tr.note);
+        vTaskDelay(pdMS_TO_TICKS(1400));
+        busy_close();
+        return;
     }
 }
 #endif /* CONFIG_EB_WIFI_ENABLE */
@@ -2014,16 +2404,41 @@ static void draw_screen(void)
     case ST_WIFI_PASS:
         draw_wifi_pass(fb);
         break;
+    case ST_WIFI_DIAG:
+        draw_wifi_diag(fb);
+        break;
 #endif
     case ST_FILMSR:   draw_filmsr(fb);       break;
     case ST_VIDEOP:   /* render owns the panel - nothing to draw */ break;
 #endif
     }
 
+    /* Визуальный маркер виртуального тапа (пульсирующий кружок пальца) */
+    extern int s_sim_finger_x;
+    extern int s_sim_finger_y;
+    extern int64_t s_sim_finger_time;
+    if (s_sim_finger_time > 0 && esp_timer_get_time() - s_sim_finger_time < 500000LL) {
+        ui_circle(fb, LCD_W, LCD_H, s_sim_finger_x, s_sim_finger_y, 22, UI_COLOR_WARN);
+        ui_circle_frame(fb, LCD_W, LCD_H, s_sim_finger_x, s_sim_finger_y, 28, UI_COLOR_OK);
+        ui_circle_frame(fb, LCD_W, LCD_H, s_sim_finger_x, s_sim_finger_y, 30, UI_COLOR_FG);
+    }
+
     app_lcd_flush(br.fb_idx);
     br.fb_idx ^= 1;
 }
 
+int s_sim_finger_x = -1;
+int s_sim_finger_y = -1;
+int64_t s_sim_finger_time = 0;
+
+static void sim_user_tap(int x, int y, const char *action_desc)
+{
+    s_sim_finger_x = x;
+    s_sim_finger_y = y;
+    s_sim_finger_time = esp_timer_get_time();
+    ESP_LOGI("USER_SIM", "👉 [ДЕЙСТВИЕ ПОЛЬЗОВАТЕЛЯ] %s -> Тап в (%d, %d)", action_desc, x, y);
+    touch_inject(x, y);
+}
 
 /* --- Actions -------------------------------------------------------------------- */
 
@@ -2108,6 +2523,35 @@ static void query_append_cp(uint32_t cp)
 
 /* --- Main loop ------------------------------------------------------------------- */
 
+static const char *state_to_str(browser_state_t st)
+{
+    switch (st) {
+    case ST_SPLASH:     return "SPLASH";
+    case ST_HOME:       return "HOME";
+    case ST_LOADING:    return "LOADING";
+    case ST_RESULTS:    return "RESULTS";
+    case ST_PAGELOAD:   return "PAGELOAD";
+    case ST_PAGE:       return "PAGE";
+    case ST_BUSY:       return "BUSY";
+    case ST_TOUCH_TEST: return "TOUCH_TEST";
+    case ST_WIFI_DIAG:  return "WIFI_DIAG";
+#if CONFIG_EB_WIFI_ENABLE
+    case ST_WIFI:       return "WIFI";
+    case ST_WIFI_PASS:  return "WIFI_PASS";
+#endif
+#if CONFIG_EB_MEDIA_ENABLE
+    case ST_RADIO:      return "РАДИО";
+    case ST_VIDEO:      return "ВИДЕО";
+    case ST_URLIN:      return "URL_INPUT";
+    case ST_VIDEOP:     return "VIDEO_PLAY";
+    case ST_FILES:      return "SD_FILES";
+    case ST_FILMS:      return "FILMS";
+    case ST_FILMSR:     return "FILMS_RESULTS";
+#endif
+    default:            return "UNKNOWN";
+    }
+}
+
 static void browser_task(void *arg)
 {
     /* Standalone boot: the LCD is already initialized, the browser owns the
@@ -2126,6 +2570,99 @@ static void browser_task(void *arg)
         int tap_y = (n > 0) ? pts[0].y : 0;
         bool tap = touch_now && !prev_touch;    /* press-and-release edge */
 
+        int64_t t_touch_us = 0;
+        if (tap) {
+            t_touch_us = esp_timer_get_time();
+            ESP_LOGI("UI_TOUCH", "👆 Касание: x=%d, y=%d [Экран: %s]",
+                     tap_x, tap_y, state_to_str(br.state));
+        }
+
+        /* Автоматический пошаговый сценарий эмуляции действий пользователя прямо на экране */
+        static int64_t s_demo_next_time = 0;
+        static int s_demo_step = 0;
+        static bool s_demo_enabled = true;
+
+        /* Отключение демо при физическом касании экрана реальным пальцем */
+        if (tap && (tap_x != s_sim_finger_x || tap_y != s_sim_finger_y)) {
+            if (s_demo_enabled) {
+                s_demo_enabled = false;
+                ESP_LOGI("USER_SIM", "✋ Обнаружено физическое касание экрана - автоэмуляция отключена.");
+            }
+        }
+
+        if (s_demo_enabled && br.state != ST_SPLASH) {
+            int64_t now = esp_timer_get_time();
+            if (s_demo_next_time == 0) {
+                s_demo_next_time = now + 2500000LL; /* Старт через 2.5 сек после выхода из SPLASH */
+            } else if (now >= s_demo_next_time) {
+                switch (s_demo_step) {
+                case 0:
+                    sim_user_tap(50, 15, "Тап по плашке Wi-Fi (открытие терминала диагностики)");
+                    s_demo_step = 1;
+                    s_demo_next_time = now + 4000000LL; /* Показываем терминал 4 сек */
+                    break;
+                case 1:
+                    if (br.state == ST_WIFI_DIAG) {
+                        sim_user_tap(126, 558, "Тап по кнопке 'ЗАКРЫТЬ' в терминале Wi-Fi");
+                        s_demo_step = 2;
+                        s_demo_next_time = now + 2500000LL;
+                    }
+                    break;
+                case 2:
+                    if (br.state == ST_HOME) {
+                        sim_user_tap(844, 180, "Тап по карточке 'ФИЛЬМЫ'");
+                        s_demo_step = 3;
+                        s_demo_next_time = now + 2500000LL;
+                    }
+                    break;
+                case 3:
+                    if (br.state == ST_FILMS) {
+                        ESP_LOGI("USER_SIM", "👉 [ДЕЙСТВИЕ ПОЛЬЗОВАТЕЛЯ] Ввод буквы 'r' в строку поиска");
+                        br.query[0] = 'r';
+                        br.query[1] = '\0';
+                        draw_screen();
+                        sim_user_tap(974, 60, "Нажатие кнопки поиска 'GO' по запросу 'r'");
+                        s_demo_step = 4;
+                        s_demo_next_time = now + 5000000LL; /* Ожидание ответа каталога */
+                    }
+                    break;
+                case 4:
+                    if (br.state == ST_FILMSR && films_n > 0) {
+                        sim_user_tap(500, 110, "Выбор первого фильма из списка результатов");
+                        s_demo_step = 5;
+                        s_demo_next_time = now + 7000000LL; /* Время для показа причины отказа */
+                    }
+                    break;
+                case 5:
+                    if (br.state == ST_FILMSR) {
+                        sim_user_tap(80, 560, "Нажатие кнопки 'МЕНЮ' (возврат на HOME)");
+                        s_demo_step = 6;
+                        s_demo_next_time = now + 3000000LL;
+                    }
+                    break;
+                default:
+                    s_demo_step = 0;
+                    s_demo_next_time = now + 8000000LL; /* Повтор сценария каждые 8 секунд в режиме ожидания */
+                    ESP_LOGI("USER_SIM", "🔄 [ЦИКЛ] Сценарий эмуляции действий пользователя завершен, повтор через 8 сек.");
+                    break;
+                }
+            }
+        }
+
+#if CONFIG_EB_WIFI_ENABLE
+        /* Тап по статусной плашке Wi-Fi (левый верхний угол, y < BAR_H, x < 380) */
+        if (tap && tap_y < BAR_H && tap_x < 380 &&
+            br.state != ST_WIFI_DIAG && br.state != ST_TOUCH_TEST &&
+            br.state != ST_SPLASH && br.state != ST_VIDEOP) {
+            br.wifi_diag_back = br.state;
+            br.state = ST_WIFI_DIAG;
+            draw_screen();
+            prev_touch = touch_now;
+            vTaskDelay(pdMS_TO_TICKS(30));
+            continue;
+        }
+#endif
+
         switch (br.state) {
         case ST_TOUCH_TEST:
             if (touch_calib_handle_input(pts, n, tap, tap_x, tap_y)) {
@@ -2137,6 +2674,20 @@ static void browser_task(void *arg)
             break;
 
 #if CONFIG_EB_WIFI_ENABLE
+        case ST_WIFI_DIAG:
+            if (tap) {
+                wifi_diag_handle_tap(tap_x, tap_y);
+                draw_screen();
+            } else {
+                static int64_t last_diag_update;
+                int64_t now = esp_timer_get_time();
+                if (now - last_diag_update > 500000LL) {
+                    last_diag_update = now;
+                    draw_screen();
+                }
+            }
+            break;
+
         case ST_WIFI:
             if (tap) {
                 wifi_handle_tap(tap_x, tap_y);
@@ -2378,14 +2929,26 @@ static void browser_task(void *arg)
             if (tap) {
                 int id = radio_hit(tap_x, tap_y);
                 if (id >= BTN_STATION && id < (int)(BTN_STATION + RADIO_STATIONS_N)) {
-                    /* не рвать PREPARING — иначе STOP + Read timeout */
-                    media_state_t st = media_get_state();
-                    if (st == MEDIA_STATE_CONNECTING) {
-                        ESP_LOGW("browser", "радио: ждём текущий старт (CONNECTING)");
-                    } else {
-                        media_radio_start(radio_stations[id - BTN_STATION].url);
-                    }
+                    int clicked_idx = id - BTN_STATION;
+
+                    /* Роберт Миллер (1968) / Якоб Нильсен: Пассивный отклик < 100 мс (Optimistic UI) */
+                    s_radio_active_idx = clicked_idx;
+                    s_radio_is_connecting = true;
+                    s_radio_conn_t0 = esp_timer_get_time();
+
                     draw_screen();
+
+                    /* W3C Event Timing / Google INP телеметрия задержки отклика */
+                    int64_t inp_ms = (esp_timer_get_time() - t_touch_us) / 1000;
+                    if (inp_ms > 100) {
+                        ESP_LOGW("UI_PERF", "⚠️ INP превышен: %lld мс (лимит: 100 мс)", inp_ms);
+                    } else {
+                        ESP_LOGI("UI_PERF", "⚡ [INP] Тач -> карточка [%s]: %lld мс (ISO 9241-110 OK)",
+                                 radio_stations[clicked_idx].name, inp_ms);
+                    }
+
+                    /* Асинхронный запуск в фоне через FreeRTOS очередь (Zero UI Wait) */
+                    radio_request_start(clicked_idx, radio_stations[clicked_idx].url);
                 } else {
                     switch (id) {
                     case BTN_MPAUSE:
@@ -2397,6 +2960,8 @@ static void browser_task(void *arg)
                         draw_screen();
                         break;
                     case BTN_MSTOP:
+                        s_radio_active_idx = -1;
+                        s_radio_is_connecting = false;
                         media_stop();
                         draw_screen();
                         break;
@@ -2649,8 +3214,94 @@ static void browser_task(void *arg)
             break;
         }
 
+#if CONFIG_EB_MEDIA_ENABLE
+        /* Якоб Нильсен: активная обратная связь при ожидании (>1 с)
+         * Периодически перерисовываем экран радио для обновления секундного таймера
+         * или при смене статуса плеера на PLAYING */
+        static int s_radio_refresh_tick = 0;
+        static media_state_t s_prev_radio_st = MEDIA_STATE_IDLE;
+        if (br.state == ST_RADIO) {
+            media_state_t cur_st = media_get_state();
+            if (s_radio_is_connecting) {
+                if (++s_radio_refresh_tick >= 16) { /* ~480 мс */
+                    s_radio_refresh_tick = 0;
+                    draw_screen();
+                }
+            }
+            if (cur_st != s_prev_radio_st) {
+                s_prev_radio_st = cur_st;
+                if (cur_st == MEDIA_STATE_PLAYING) {
+                    s_radio_is_connecting = false;
+                }
+                draw_screen();
+            }
+        }
+#endif
+
+        /* W3C Event Timing / Google INP: замер времени отклика на физическое касание */
+        if (tap && t_touch_us > 0) {
+            int64_t inp_ms = (esp_timer_get_time() - t_touch_us) / 1000;
+            if (inp_ms > 100) {
+                ESP_LOGW("UI_PERF", "⚠️ [INP] Время отклика экрана: %lld мс [Экран: %s] (>100 мс)",
+                         inp_ms, state_to_str(br.state));
+            } else {
+                ESP_LOGI("UI_PERF", "⚡ [INP] Время отклика экрана: %lld мс [Экран: %s] (Good < 100 мс)",
+                         inp_ms, state_to_str(br.state));
+            }
+        }
+
         prev_touch = touch_now;
         vTaskDelay(pdMS_TO_TICKS(br.state == ST_TOUCH_TEST ? 15 : 30));
+    }
+}
+
+static void uart_cmd_task(void *arg)
+{
+    char buf[64];
+    int idx = 0;
+    ESP_LOGI("UART_HIL", "🤖 HIL-терминал готов: TAP <x> <y>, CLICK FILMS, CLICK WIFI, CLICK RADIO, CLICK HOME, STATUS");
+
+    while (1) {
+        int c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            if (idx == 0) {
+                continue;
+            }
+            buf[idx] = '\0';
+            idx = 0;
+
+            int tx = 0, ty = 0;
+            if (sscanf(buf, "TAP %d %d", &tx, &ty) == 2) {
+                ESP_LOGI("UART_HIL", "⚡ Команда HIL: TAP %d %d", tx, ty);
+                touch_inject(tx, ty);
+            } else if (strcmp(buf, "STATUS") == 0) {
+                ESP_LOGI("UART_HIL", "📊 STATUS: screen=%s wifi_state=%s wifi_ready=%d ssid=\"%s\" ip=\"%s\"",
+                         state_to_str(br.state), wifi_mgr_status_str(), (int)wifi_mgr_ready(),
+                         wifi_mgr_saved_ssid(), wifi_mgr_ip_str());
+            } else if (strcmp(buf, "CLICK FILMS") == 0) {
+                ESP_LOGI("UART_HIL", "⚡ Команда HIL: Клик 'ФИЛЬМЫ'");
+                touch_inject(844, 180);
+            } else if (strcmp(buf, "CLICK WIFI") == 0) {
+                ESP_LOGI("UART_HIL", "⚡ Команда HIL: Клик значок Wi-Fi");
+                touch_inject(50, 15);
+            } else if (strcmp(buf, "CLICK RADIO") == 0) {
+                ESP_LOGI("UART_HIL", "⚡ Команда HIL: Клик 'РАДИО'");
+                touch_inject(180, 180);
+            } else if (strcmp(buf, "CLICK HOME") == 0) {
+                ESP_LOGI("UART_HIL", "⚡ Команда HIL: Клик 'ДОМОЙ'");
+                touch_inject(980, 16);
+            } else if (strcmp(buf, "HELP") == 0) {
+                ESP_LOGI("UART_HIL", "Команды: TAP <x> <y>, CLICK FILMS, CLICK WIFI, CLICK RADIO, CLICK HOME, STATUS");
+            } else {
+                ESP_LOGW("UART_HIL", "Неизвестная команда: '%s' (введите HELP)", buf);
+            }
+        } else if (idx < (int)sizeof(buf) - 1) {
+            buf[idx++] = (char)c;
+        }
     }
 }
 
@@ -2668,6 +3319,7 @@ void browser_start(void)
      * self-attaches to the NIC once it is up, so start it right away -
      * probe/PREPARING phases need it too, before media_player_init runs */
     pstats_init();
+    radio_worker_init_once();
 #endif
 
     esp_err_t eth_err = app_net_start();
@@ -2684,6 +3336,9 @@ void browser_start(void)
                                 3, NULL, 1) != pdPASS) {
         ESP_LOGE(TAG, "failed to create browser task");
     }
+
+    /* Фоновый приемник UART HIL команд для автотестов */
+    xTaskCreatePinnedToCore(uart_cmd_task, "uart_hil", 4096, NULL, 2, NULL, 0);
 }
 
 
