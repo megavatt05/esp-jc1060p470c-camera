@@ -8,6 +8,7 @@
 #include "sdkconfig.h"
 #include "net/app_eth.h"
 #include "net/wifi_mgr.h"
+#include "net/c6_update.h"
 #include "net/app_net.h"
 
 static const char *TAG = "app_net";
@@ -25,6 +26,7 @@ esp_err_t app_net_start(void)
 #endif
 
 #if CONFIG_EB_WIFI_ENABLE
+    c6_update_check_and_flash();
     wifi_err = wifi_mgr_init();
     if (wifi_err != ESP_OK) {
         ESP_LOGW(TAG, "Wi-Fi: %s", esp_err_to_name(wifi_err));

@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -45,6 +46,38 @@ static const char *TAG = "wifi_mgr";
 #define BIT_OK   BIT0
 #define BIT_FAIL BIT1
 
+static char s_wifi_logs[WIFI_MGR_LOG_MAX][WIFI_MGR_LOG_LEN];
+static int  s_wifi_log_count = 0;
+static portMUX_TYPE s_log_lock = portMUX_INITIALIZER_UNLOCKED;
+
+void wifi_mgr_log_event(const char *fmt, ...)
+{
+    char msg[WIFI_MGR_LOG_LEN - 16];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    int64_t now_ms = esp_timer_get_time() / 1000LL;
+    int sec = (int)((now_ms / 1000LL) % 3600LL);
+    int ms100 = (int)((now_ms % 1000LL) / 100LL);
+    char entry[WIFI_MGR_LOG_LEN];
+    snprintf(entry, sizeof(entry), "[%02d:%02d.%d] %s", sec / 60, sec % 60, ms100, msg);
+
+    portENTER_CRITICAL(&s_log_lock);
+    if (s_wifi_log_count < WIFI_MGR_LOG_MAX) {
+        strlcpy(s_wifi_logs[s_wifi_log_count++], entry, WIFI_MGR_LOG_LEN);
+    } else {
+        for (int i = 0; i < WIFI_MGR_LOG_MAX - 1; i++) {
+            memcpy(s_wifi_logs[i], s_wifi_logs[i + 1], WIFI_MGR_LOG_LEN);
+        }
+        strlcpy(s_wifi_logs[WIFI_MGR_LOG_MAX - 1], entry, WIFI_MGR_LOG_LEN);
+    }
+    portEXIT_CRITICAL(&s_log_lock);
+
+    ESP_LOGI(TAG, "%s", msg);
+}
+
 typedef struct {
     bool                 ready;
     bool                 do_connect; /* true → на STA_START вызвать connect */
@@ -68,7 +101,7 @@ static mgr_t M;
 static void status_set(const char *s)
 {
     strlcpy(M.status, s, sizeof(M.status));
-    ESP_LOGI(TAG, "%s", s);
+    wifi_mgr_log_event("%s", s);
 }
 
 /* ---- NVS ---------------------------------------------------------------- */
@@ -112,8 +145,20 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)arg;
 
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        wifi_mgr_log_event("STA запущен, подключение к '%s'...", M.ssid[0] ? M.ssid : "авто");
         if (M.do_connect) {
             esp_wifi_connect();
+        }
+        return;
+    }
+
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        wifi_ap_record_t ap = {0};
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            wifi_mgr_log_event("Связано с '%.32s' (Ch %d, RSSI %d dBm)",
+                               (char *)ap.ssid, ap.primary, ap.rssi);
+        } else {
+            wifi_mgr_log_event("Связь с AP установлена");
         }
         return;
     }
@@ -126,6 +171,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             reason = d->reason;
             ESP_LOGW(TAG, "обрыв reason=%d", reason);
         }
+        const char *rs = (reason == 201) ? "AP не найдена (201)" :
+                         (reason == 202 || reason == 15) ? "неверный пароль (202)" :
+                         (reason == 203) ? "assoc fail (203)" :
+                         (reason == 204) ? "handshake timeout (204)" : "обрыв связи";
+        wifi_mgr_log_event("Обрыв Wi-Fi: %s (код %d)", rs, reason);
+
         if (!M.do_connect) {
             return;
         }
@@ -153,6 +204,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         M.state = WIFI_MGR_CONNECTED;
         status_set("есть IP");
         ESP_LOGI(TAG, "IP %s", M.ip);
+        wifi_mgr_log_event("DHCP OK: IP %s (шлюз " IPSTR ")", M.ip, IP2STR(&e->ip_info.gw));
         {
             wifi_ap_record_t ap = {0};
             if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
@@ -373,6 +425,7 @@ esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
         status_set("start fail");
         return e;
     }
+    esp_wifi_set_ps(WIFI_PS_NONE);
     {
         esp_err_t ce = esp_wifi_connect();
         ESP_LOGD(TAG, "esp_wifi_connect -> %s", esp_err_to_name(ce));
@@ -652,4 +705,67 @@ esp_err_t wifi_mgr_test_internet(wifi_mgr_test_t *out)
     status_set(out->note);
     M.state = WIFI_MGR_CONNECTED;
     return ESP_OK;
+}
+
+void wifi_mgr_get_diag(wifi_mgr_diag_t *diag)
+{
+    if (!diag) {
+        return;
+    }
+    memset(diag, 0, sizeof(*diag));
+    diag->state = M.state;
+    strlcpy(diag->ssid, M.ssid[0] ? M.ssid : "—", sizeof(diag->ssid));
+    strlcpy(diag->status_str, M.status[0] ? M.status : "—", sizeof(diag->status_str));
+    strlcpy(diag->c6_fw_str, "C6: SDIO host 3.0.9 = c6 3.0.9 (SW_AGGR 15.8K)", sizeof(diag->c6_fw_str));
+    strlcpy(diag->bssid_str, "—", sizeof(diag->bssid_str));
+    strlcpy(diag->auth_str, "—", sizeof(diag->auth_str));
+    strlcpy(diag->ip, M.ip[0] ? M.ip : "0.0.0.0", sizeof(diag->ip));
+    strlcpy(diag->netmask, "—", sizeof(diag->netmask));
+    strlcpy(diag->gw, "—", sizeof(diag->gw));
+    strlcpy(diag->dns, "—", sizeof(diag->dns));
+
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        if (ap.ssid[0]) {
+            strlcpy(diag->ssid, (const char *)ap.ssid, sizeof(diag->ssid));
+        }
+        snprintf(diag->bssid_str, sizeof(diag->bssid_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                 ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+        diag->rssi = ap.rssi;
+        diag->channel = ap.primary;
+
+        switch (ap.authmode) {
+        case WIFI_AUTH_OPEN:            strlcpy(diag->auth_str, "Open", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WEP:             strlcpy(diag->auth_str, "WEP", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WPA_PSK:         strlcpy(diag->auth_str, "WPA-PSK", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WPA2_PSK:        strlcpy(diag->auth_str, "WPA2-PSK", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WPA_WPA2_PSK:    strlcpy(diag->auth_str, "WPA/WPA2", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WPA2_ENTERPRISE: strlcpy(diag->auth_str, "WPA2-Ent", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WPA3_PSK:        strlcpy(diag->auth_str, "WPA3-SAE", sizeof(diag->auth_str)); break;
+        case WIFI_AUTH_WPA2_WPA3_PSK:   strlcpy(diag->auth_str, "WPA2/WPA3", sizeof(diag->auth_str)); break;
+        default:                        strlcpy(diag->auth_str, "Защищенная", sizeof(diag->auth_str)); break;
+        }
+    }
+
+    if (M.netif_sta) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(M.netif_sta, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+            snprintf(diag->ip, sizeof(diag->ip), IPSTR, IP2STR(&ip_info.ip));
+            snprintf(diag->netmask, sizeof(diag->netmask), IPSTR, IP2STR(&ip_info.netmask));
+            snprintf(diag->gw, sizeof(diag->gw), IPSTR, IP2STR(&ip_info.gw));
+        }
+        esp_netif_dns_info_t dns_info;
+        if (esp_netif_get_dns_info(M.netif_sta, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK &&
+            dns_info.ip.u_addr.ip4.addr != 0) {
+            snprintf(diag->dns, sizeof(diag->dns), IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+        }
+    }
+
+    portENTER_CRITICAL(&s_log_lock);
+    diag->log_count = s_wifi_log_count;
+    for (int i = 0; i < s_wifi_log_count; i++) {
+        strlcpy(diag->logs[i], s_wifi_logs[i], WIFI_MGR_LOG_LEN);
+    }
+    portEXIT_CRITICAL(&s_log_lock);
 }

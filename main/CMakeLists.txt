@@ -1,7 +1,7 @@
 set(srcs "main.c" "app_lcd.c" "app_overlay.c"
           "camos/ui.c" "camos/touch.c"
           "net/app_eth.c" "net/app_net.c"
-          "net/log_server.c" "net/speed_test.c" "net/wifi_mgr.c"
+          "net/log_server.c" "net/speed_test.c" "net/wifi_mgr.c" "net/c6_update.c"
           "browser/web_client.c" "browser/html_text.c" "browser/browser.c"
           "browser/touch_calib.c"
           "media/media_audio.c" "media/media_player.c" "media/pstats.c"
@@ -12,6 +12,7 @@ if(CONFIG_EB_MEDIA_ENABLE)
 endif()
 
 idf_component_register(SRCS "${srcs}"
+                       EMBED_FILES "c6_fw.bin"
                        PRIV_INCLUDE_DIRS .
                        PRIV_REQUIRES
                            esp_timer
@@ -45,4 +46,5 @@ idf_component_register(SRCS "${srcs}"
                            espressif__gmf_core
                            espressif__esp_audio_codec
                            espressif__esp_video_codec
+                           espressif__esp_hosted
 )

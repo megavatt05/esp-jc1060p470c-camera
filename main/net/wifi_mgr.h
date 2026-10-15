@@ -70,6 +70,29 @@ esp_err_t wifi_mgr_stop_portal(void);
 
 esp_err_t wifi_mgr_test_internet(wifi_mgr_test_t *out);
 
+#define WIFI_MGR_LOG_MAX 12
+#define WIFI_MGR_LOG_LEN 80
+
+typedef struct {
+    wifi_mgr_state_t state;
+    char             ssid[WIFI_MGR_SSID_MAX + 1];
+    char             bssid_str[20];
+    int8_t           rssi;
+    uint8_t          channel;
+    char             auth_str[16];
+    char             ip[16];
+    char             netmask[16];
+    char             gw[16];
+    char             dns[16];
+    char             status_str[48];
+    char             c6_fw_str[48];
+    char             logs[WIFI_MGR_LOG_MAX][WIFI_MGR_LOG_LEN];
+    int              log_count;
+} wifi_mgr_diag_t;
+
+void wifi_mgr_get_diag(wifi_mgr_diag_t *diag);
+void wifi_mgr_log_event(const char *fmt, ...);
+
 #ifdef __cplusplus
 }
 #endif

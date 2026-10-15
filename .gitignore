@@ -5,3 +5,10 @@ managed_components/
 *.log
 *.ps1
 scratch/
+
+# клон прошивки C6 (300 МБ исходников esp_hosted) — не для репозитория
+c6_firmware/
+__pycache__/
+*.pyc
+.vscode/
+.clangd
