@@ -1,98 +1,171 @@
-menu "Example Configuration"
+menu "Станок намотки — GUITION JC1060P470C"
 
-    config EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR
-        bool "Enable MIPI CSI Camera Sensor"
-        default y
-        depends on SOC_MIPI_CSI_SUPPORTED
+	menu "RS-485 / частотник Easydrive Mini-S"
 
-    if EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_PORT
-            int "MIPI CSI SCCB I2C Port Number"
-            default 0
-            range 0 1
+		config STANOK_RS485_UART_NUM
+			int "Номер UART"
+			default 1
+			help
+			  Гребёнка с подписью 485 на этой плате заведена на UART1.
+			  Стоит ли на ней трансивер MAX485 или только TTL-уровень 3.3 В —
+			  по источникам расходится; если это TTL, нужен внешний модуль
+			  TTL->RS-485 (SP3485/MAX485). На работу кода это не влияет:
+			  кадры те же, а ноги при непонятной разводке подберутся сами.
 
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_SCL_PIN
-            int "MIPI CSI SCCB I2C SCL Pin"
-            default 34
-            range -1 56
+		config STANOK_RS485_TX_GPIO
+			int "GPIO передатчика (TX)"
+			default 26
+			help
+			  По схеме V1.0: вывод 45 ESP32-P4 (GPIO26) = сеть TX1 -> R75 (0R)
+			  -> DI встроенного приёмопередатчика U8 MAX485.
 
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_SDA_PIN
-            int "MIPI CSI SCCB I2C SDA Pin"
-            default 31
-            range -1 56
+		config STANOK_RS485_RX_GPIO
+			int "GPIO приёмника (RX)"
+			default 27
+			help
+			  По схеме V1.0: вывод 46 ESP32-P4 (GPIO27) = сеть RX1 <- R70 (0R)
+			  <- RO того же MAX485. Раньше этот пин в проекте числился сбросом
+			  LCD — по схеме сброс дисплея сидит на GPIO0, так что GPIO27
+			  свободен именно для 485.
 
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_FREQ
-            int "MIPI CSI SCCB I2C Frequency"
-            default 100000
-            range 100000 400000
-            help
-                Increasing this value can reduce the initialization time of the camera sensor.
-                Please refer to the relevant instructions of the camera sensor to adjust the value.
+		config STANOK_RS485_DE_GPIO
+			int "GPIO управления направлением (DE/RE), -1 = авто-направление"
+			default -1
+			range -1 48
+			help
+			  UART1 на ESP32-P4 не поддерживает аппаратный RTS, поэтому DE
+			  переключается драйвером (UART_MODE_RS485_HALF_DUPLEX).
 
-        config EXAMPLE_MIPI_CSI_CAM_SENSOR_RESET_PIN
-            int "MIPI CSI Camera Sensor Reset Pin"
-            default -1
-            range -1 56
+			  НА ПЛАТЕ DE ПЕРЕВАРИВАТЬ НЕ НУЖНО. По схеме V1.0 /RE и /DE
+			  восьмого U8 соединены в цепь EN, а она через R76 (0R) висит на
+			  TX1_1 — это типовая схема автоматического направления на
+			  74LVC1G132 + Q3 (8550): пока TX в нуле приём включён, старт-бит
+			  разворачивает передатчик. Ставьте -1.
+			  Любое значение DE кроме -1 автоподбор пары TX/RX ВЫКЛЮЧАЕТ —
+			  панель тогда намертво держит назначенные вами ноги.
 
-        config EXAMPLE_MIPI_CSI_CAM_SENSOR_PWDN_PIN
-            int "MIPI CSI Camera Sensor Power Down Pin"
-            default -1
-            range -1 56
-    endif
+		config STANOK_RS485_AUTO_PINS
+			bool "Автоподбирать пару TX/RX, если привод молчит"
+			default y
+			depends on STANOK_RS485_DE_GPIO < 0
+			help
+			  Описания линии 485 этой платы расходятся (README: GPIO2/3,
+			  разметка гребёнки: GPIO20/21, схема: MAX485 на GPIO26/27,
+			  где GPIO27 — сброс LCD). При молчании привода драйвер шлёт
+			  настоящий Modbus-кадр на каждой кандидатурной паре и
+			  оставляет ту, с которой пришёл ответ с живой CRC.
 
-    config EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE
-        bool "enable print fps rate value"
-        default y
+		config STANOK_RS485_PIN_SCAN
+			bool "После типовых пар перебирать все свободные GPIO"
+			default y
+			depends on STANOK_RS485_AUTO_PINS
+			help
+			  ~16 с перебора один раз за старт. Не найдено ничего — панель
+			  пишет в лог и оставляет ноги из menuconfig.
 
-    config EXAMPLE_USE_MEMORY_MAPPING
-        bool "Use Memory Mapping for Buffer Allocation"
-        default n
-        help
-        Enable this option if you want to allocate memory using memory mapping.
-        This is typically useful for performance optimization or when working
-        with hardware that requires mapped memory access
+		config STANOK_RS485_BAUD
+			int "Скорость"
+			default 9600
+			help
+			  Должно совпадать с P8.01 частотника. Проверено на живом приводе:
+			  P8.01=0x13 -> 9600, 8_data_bits, ЧЁТНАЯ парность, 1 стоп.
+			  С 8N1 привод молчит.
 
-    config EXAMPLE_CAM_BUF_COUNT
-        int "Camera Buffer Count"
-        default 2
-        range 2 3
+		config STANOK_VFD_ADDR
+			int "Modbus-адрес частотника"
+			default 1
+			range 1 31
 
-    choice
-        prompt "Choose the color format of the LCD"
-        default LCD_PIXEL_FORMAT_RGB565
-            config LCD_PIXEL_FORMAT_RGB565
-                bool "RGB565"
+		config STANOK_POLL_MS
+			int "Период опроса телеметрии, мс"
+			default 200
+			help
+			  Измеренная латентность одного кадра 29..39 мс на 9600 8E1.
+			  Полный цикл опроса (ход + состояние) = 2 кадра, медленные
+			  величины (звено, сеть, температуры) раз в 5 циклов.
 
-            config LCD_PIXEL_FORMAT_RGB888
-                bool "RGB888"
-    endchoice
+		config STANOK_RESP_TIMEOUT_MS
+			int "Таймаут ожидания ответа, мс"
+			default 120
 
-    config EXAMPLE_ENABLE_CAM_SENSOR_PIC_VFLIP
-        bool "Enable Camera Sensor Picture Vertical Flip"
-        default n
-        help
-            Select this option, enable camera sensor picture vertical flip.
+		config STANOK_RS485_TURNAROUND_MS
+			int "Пауза перед новым запросом после ответа привода, мс"
+			default 15
+			range 2 100
+			help
+			  Измерено на этом приводе: если следующий запрос уходит сразу
+			  за его ответом, привод теряет начало кадра и молчит весь
+			  таймаут — линия при этом полностью живая. Пауза отсчитывается
+			  от момента, когда контроллер перестал принимать байты.
 
-    config EXAMPLE_ENABLE_CAM_SENSOR_PIC_HFLIP
-        bool "Enable Camera Sensor Picture Horizontal Flip"
-        default n
-        help
-            Select this option, enable camera sensor picture horizontal flip.
+		config STANOK_LINK_TIMEOUT_MS
+			int "Таймаут потери связи, мс"
+			default 1000
+			help
+			  Если привод не отвечал дольше этого времени, панель переходит в
+			  аварийный режим и сама шлёт СТОП. На всякий случай у самого
+			  привода должен быть короткий P8.02 (таймаут связи): если умрёт
+			  панель, привод остановится по Er14 сам.
 
-endmenu
+		config STANOK_MAX_FREQ_HZ
+			int "Запрет на частоту выше, Гц"
+			default 50
+			help
+			  Программный потолок: панель не запишет в 0x2001 больше этого
+			  значения, даже если оператор введёт другое число.
 
-menu "Example Boards Types"
+		config STANOK_STOP_ON_BOOT
+			bool "Гасить привод при запуске панели"
+			default y
+			help
+			  Нужено, чтобы после падения/перезагрузки панели (watchdog) станок
+			  не остался в RUN: при первом же успешном опросе панель видит
+			  bit4 RUN и отправляет СТОП.
 
-    choice
-        prompt "Choose the Boards Types"
-        default BOARD_TYPE_JC4880P443
-            config BOARD_TYPE_JC4880P443
-                bool "JC4880P4433"
+	endmenu
 
-            config BOARD_TYPE_JC8012P4A1
-                bool "JC8012P4A1"
-            config BOARD_TYPE_JC1060P470
-                bool "JC1060P470"
-    endchoice
+	menu "ИДМ-20 (мерное колесо) — по умолчанию ВЫКЛЮЧЕН"
+
+		config STANOK_USE_IDM20
+			bool "Подключён измеритель длины ИДМ-20"
+			default n
+			help
+			  Пока датчик не подключён, оставьте выключенным: PCNT не
+			  инициализируется, длина остаётся 0.00 м, а автомат останова
+			  по длине не срабатывает. Панель и управление частотником
+			  при этом полностью рабочие.
+
+		if STANOK_USE_IDM20
+
+			config STANOK_IDM20_A_GPIO
+				int "Фаза A"
+				default 4
+
+			config STANOK_IDM20_B_GPIO
+				int "Фаза B"
+				default 5
+				help
+				  GPIO5 - strapping (BOOT_0), использовать можно, но линия не
+				  должна быть замкнута в 0 на момент сброса платы.
+
+		endif
+
+	endmenu
+
+	menu "Тачскрин GT911"
+
+		config STANOK_TOUCH_RST_GPIO
+			int "GPIO сброса тача"
+			default 22
+
+		config STANOK_TOUCH_INT_GPIO
+			int "GPIO прерывания тача, -1 = опросом"
+			default 21
+			help
+			  По схеме V1.0: GPIO21 = TOUCH_INT, GPIO22 = TOUCH_RST,
+			  GPIO23 = LCD_PWM (подсветка). Линия 485 этих ног не касается,
+			  так что INT можно держать включённым.
+
+	endmenu
 
 endmenu

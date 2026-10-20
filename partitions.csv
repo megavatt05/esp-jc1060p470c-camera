@@ -1,5 +1,8 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-# IDF 6 + P4: partition table @ 0x10000 → first partition >= 0x11000
+# Таблица разделов для платы GUITION JC1060P470C (Flash 16 МБ, QIO 80 МГц)
+# IDF 6 + P4: загрузчик на 0x2000 занимает ~24 КБ, поэтому таблица разделов
+# сдвинута на 0x10000 (CONFIG_PARTITION_TABLE_OFFSET) — тот же расклад, что в
+# других ветках репозитория. Первый раздел => 0x11000, приложение => 0x20000.
+# Name,   Type, SubType, Offset,  Size,     Flags
 nvs,      data, nvs,     0x11000, 0x6000,
 phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        0x200000,
+factory,  app,  factory, ,        0x400000,

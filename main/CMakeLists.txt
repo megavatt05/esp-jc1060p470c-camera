@@ -1,17 +1,29 @@
-set(srcs "main.c" "app_video.c" "app_lcd.c")
-
-idf_component_register(SRCS "${srcs}"
-                       PRIV_INCLUDE_DIRS .
-                       PRIV_REQUIRES
-                           esp_timer
-                           esp_pm
-                           esp_mm
-                           esp_lcd
-                           esp_driver_gpio
-                           esp_driver_spi
-                           esp_driver_ledc
-                           esp_driver_ppa
-                           esp_driver_isp
-                           heap
-                           log
+idf_component_register(
+    SRCS
+        "main.c"
+        "board_jc1060p470c.c"
+        "idm20_encoder.c"
+        "vfd_easydrive.c"
+        "ui_winder.c"
+        "fonts/lv_font_dejavu_16.c"
+        "fonts/lv_font_dejavu_24.c"
+        "fonts/lv_font_dejavu_32.c"
+        "fonts/lv_font_digits_48.c"
+        "fonts/lv_font_digits_72.c"
+        "fonts/lv_font_digits_120.c"
+    INCLUDE_DIRS "." "fonts"
+    REQUIRES
+        esp_lcd
+        esp_lvgl_port
+        lvgl
+        nvs_flash
+        esp_timer
+        esp_hw_support
+        esp_driver_ledc
+        esp_driver_uart
+        esp_driver_pcnt
+        esp_driver_i2c
+        esp_driver_gpio
 )
+
+target_compile_definitions(${COMPONENT_LIB} PUBLIC "-DLV_CONF_INCLUDE_SIMPLE")

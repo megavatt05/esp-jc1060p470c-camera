@@ -1,16 +1,7 @@
+## Зависимости компонентов ESP-IDF для проекта pon-stanok-p4
 dependencies:
-  idf: '>=5.4'
-
-  esp_video:
-    version: "~1.2.0"
-    public: true
-
-  espressif/usb:
-    version: "*"
-
-  espressif/esp_lcd_ek79007:
-    version: 1.*
-    public: true
-  espressif/esp_lcd_jd9365: "^1.0.2"
-  espressif/esp_lcd_jd9165: "*"
-  espressif/esp_lcd_st7701: "*"
+  idf: ">=6.0.0"
+  espressif/esp_lcd_jd9165: "^2.0.2"
+  espressif/esp_lcd_touch_gt911: "^1.2.1"
+  lvgl/lvgl: "~9.5.0"
+  esp_lvgl_port: "~2.9.0"
