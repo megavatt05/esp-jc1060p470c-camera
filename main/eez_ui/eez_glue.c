@@ -512,6 +512,81 @@ const char *get_var_c_frame_txt(void)
     return snr(b, sizeof(b), "кадр: %s", g_vfd.dbg_frame[0] ? g_vfd.dbg_frame : "-");
 }
 
+// ---------------------------------------------------------------- взведение кнопок
+// GT911 на этой плате добавляет одиночные фантомные касания (см. README платы), а
+// ПУСК/РЕВЕРС/ТОЛЧОК вращают вал. Ход даёт только второе нажатие: первое взводит
+// кнопку на 3 с, перекрашивает её в янтарный и показывает «ЕЩЁ РАЗ».
+// СТОП и СБРОС аварии остаются одношаговыми - их терять из-за задержки опаснее.
+#define ARM_NONE      (-1)
+#define ARM_WINDOW_US (3 * 1000 * 1000)
+#define ARM_COLOR     0xf59e0b
+
+enum { ARM_START = 0, ARM_REV = 1, ARM_JOG = 2, ARM_COUNT = 3 };
+
+static const char *const ARM_IDLE_TXT[ARM_COUNT] = { "ПУСК", "РЕВЕРС", "ТОЛЧОК" };
+static const char *const ARM_SHOT_TXT[ARM_COUNT] = { "ПУСК?\nЕЩЁ РАЗ",
+                                                     "РЕВЕРС?\nЕЩЁ РАЗ",
+                                                     "ТОЛЧОК?\nЕЩЁ РАЗ" };
+// Цвета кнопок из макета: без них кнопка после сброса остаётся янтарной.
+static const uint32_t ARM_IDLE_COLOR[ARM_COUNT] = { 0x16a34a, 0x2d3a4e, 0x2563eb };
+
+static int s_armed = ARM_NONE;
+static int64_t s_arm_until_us;
+
+static lv_obj_t *arm_btn(int id)
+{
+    switch (id) {
+    case ARM_REV: return objects.btn_rev;
+    case ARM_JOG: return objects.btn_jog;
+    default:      return objects.btn_start;
+    }
+}
+
+static lv_obj_t *arm_lbl(int id)
+{
+    switch (id) {
+    case ARM_REV: return objects.btn_rev_lbl;
+    case ARM_JOG: return objects.btn_jog_lbl;
+    default:      return objects.btn_start_lbl;
+    }
+}
+
+static void arm_paint(int id, const char *txt, uint32_t color)
+{
+    lv_obj_t *btn = arm_btn(id);
+    lv_obj_t *lbl = arm_lbl(id);
+    if (btn && lbl) {
+        lv_label_set_text(lbl, txt);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+    }
+}
+
+static void arm_release(void)
+{
+    if (s_armed != ARM_NONE) {
+        arm_paint(s_armed, ARM_IDLE_TXT[s_armed], ARM_IDLE_COLOR[s_armed]);
+        s_armed = ARM_NONE;
+    }
+    s_arm_until_us = 0;
+}
+
+// false = кнопку только что взвели, действие НЕ выполнять
+static bool arm_confirm(int id)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_armed != id || now > s_arm_until_us) {
+        arm_release();
+        s_armed = id;
+        s_arm_until_us = now + ARM_WINDOW_US;
+        arm_paint(id, ARM_SHOT_TXT[id], ARM_COLOR);
+        ESP_LOGW(TAG, "%s взведён: подтвердите нажатием в течение 3 с", ARM_IDLE_TXT[id]);
+        return false;
+    }
+    arm_release();
+    ESP_LOGI(TAG, "%s подтверждён вторым нажатием", ARM_IDLE_TXT[id]);
+    return true;
+}
+
 // ---------------------------------------------------------------- действия
 void action_nav_main(lv_event_t *e)  { (void)e; loadScreen(SCREEN_ID_MAIN); }
 void action_nav_params(lv_event_t *e){ (void)e; loadScreen(SCREEN_ID_PARAMS); }
@@ -521,36 +596,39 @@ void action_nav_conn(lv_event_t *e)  { (void)e; loadScreen(SCREEN_ID_CONN); }
 void action_btn_start(lv_event_t *e)
 {
     (void)e;
-    vfd_cmd_run_fwd(s_sp_raw / 100.0f);
+    if (arm_confirm(ARM_START)) vfd_cmd_run_fwd(s_sp_raw / 100.0f);
 }
 
 void action_btn_stop(lv_event_t *e)
 {
     (void)e;
+    arm_release();   // снятие/останов всегда проходится одним касанием
     vfd_cmd_stop();
 }
 
 void action_btn_rev(lv_event_t *e)
 {
     (void)e;
-    vfd_cmd_run_rev(s_sp_raw / 100.0f);
+    if (arm_confirm(ARM_REV)) vfd_cmd_run_rev(s_sp_raw / 100.0f);
 }
 
 void action_btn_jog(lv_event_t *e)
 {
     (void)e;
-    vfd_cmd_jog(false, s_jog_hz);
+    if (arm_confirm(ARM_JOG)) vfd_cmd_jog(false, s_jog_hz);
 }
 
 void action_btn_fault_reset(lv_event_t *e)
 {
     (void)e;
+    arm_release();
     vfd_cmd_reset_fault();
 }
 
 void action_fault_reset(lv_event_t *e)
 {
     (void)e;
+    arm_release();
     vfd_cmd_reset_fault();
 }
 
@@ -627,6 +705,9 @@ static void on_ui_timer(lv_timer_t *t)
     }
     ui_tick();
     paint_colors();
+    // Взведение живёт 3 с: без этого сброса кнопка осталась бы янтарной и
+    // следующее (уже осознанное) касание запустило бы вал без подтверждения.
+    if (s_armed != ARM_NONE && esp_timer_get_time() > s_arm_until_us) arm_release();
 }
 
 void eez_ui_init(void)
