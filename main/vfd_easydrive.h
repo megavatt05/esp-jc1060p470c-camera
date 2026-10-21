@@ -56,13 +56,15 @@ extern "C" {
 
 /* ---- Командное слово 0x2000 (мануал, таблицы 3 и 4) ----
  * bit0..1  01 стоп | 10 пуск | 11 JOG
- * bit2..3  11 непрерывно | 01 однократно
+ * bit2..3  00 «run for once» (однократно) | 11 непрерывно
  * bit4..5  01 вперёд | 10 назад | 11 сброс аварии */
 #define VFD_CMD_STOP          0x0001u
 #define VFD_CMD_FWD_RUN       0x001Eu
 #define VFD_CMD_REV_RUN       0x002Eu
-#define VFD_CMD_FWD_JOG       0x0013u
+#define VFD_CMD_FWD_JOG       0x0013u   /* табл.4: бит2..3=00, толчок однократно */
 #define VFD_CMD_REV_JOG       0x0023u
+#define VFD_CMD_FWD_JOG_HOLD  0x001Fu   /* тот же толчок, но бит2..3=11 «непрерывно» */
+#define VFD_CMD_REV_JOG_HOLD  0x002Fu
 #define VFD_CMD_FAULT_RESET   0x0031u
 
 /* ---- Карта адресов ---- */
@@ -121,6 +123,12 @@ typedef struct {
     uint16_t last_cmd;           /* последнее командное слово */
     bool     last_cmd_acked;     /* привод ответил эхом */
     bool     last_cmd_confirmed; /* и подтвердил его чтением состояния */
+    uint16_t cmd_readback;       /* что реально лежит в 0x2000 после записи */
+    bool     cmd_readback_ok;    /* чтение 0x2000 совпало с записанным */
+    uint16_t echo_bytes;         /* максимум байт, принятых во время НАШЕЙ
+                                  * передачи: ненулевой = линия 485 возвращает
+                                  * нам собственный кадр, эхо не является
+                                  * ответом привода */
     uint8_t  uart_tx_gpio;       /* реально работающая пара ног: её подбирает
                                  * probe_bus_pins(), если в menuconfig ошибка */
     uint8_t  uart_rx_gpio;

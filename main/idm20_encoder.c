@@ -26,8 +26,8 @@ winder_context_t g_winder = {
     .cal_coeff           = 1.00000f,// Номинальный поправочный коэффициент
     .ref_length_m        = 10.0f,   // Эталонный отрезок для калибровки по умолчанию (10.00 м)
     .total_production_m  = 0.0,     // Суммарный счетчик выработки за смену/всего
-    .spool_initial_len_m = 1000.0f, // Начальный метраж бухты (до 2000 м)
-    .spool_remaining_len_m = 1000.0f,// Текущий остаток в бухте
+    .spool_initial_len_m = 2000.0f, // Начальный метраж бухты по умолчанию (до 2000 м)
+    .spool_remaining_len_m = 2000.0f,// Текущий остаток в бухте (при старте = всей бухте)
     .const_line_speed_en = true,
     .target_speed_m_min  = 40.0f,
     .base_freq_hz        = 35.0f,

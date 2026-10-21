@@ -8,7 +8,7 @@
 #include "board_jc1060p470c.h"
 #include "idm20_encoder.h"
 #include "vfd_easydrive.h"
-#include "ui_winder.h"
+#include "eez_ui.h"
 
 static const char *TAG = "PON_STANOK_APP";
 
@@ -43,9 +43,9 @@ void app_main(void)
 
     // 5. Построение графического интерфейса под мьютексом LVGL
     if (lvgl_port_lock(0)) {
-        winder_ui_init();
+        eez_ui_init();
         lvgl_port_unlock();
-        ESP_LOGI(TAG, "Интерфейс станка намотки готов к приему команд пользователя!");
+        ESP_LOGI(TAG, "Панель EASYDRIVE (EEZ Studio) готова к приему команд пользователя!");
     } else {
         ESP_LOGE(TAG, "Не удалось захватить мьютекс LVGL для построения UI");
     }
@@ -54,11 +54,8 @@ void app_main(void)
     // 6. Главный цикл диагностики
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "Статус станка: %d | Длина: %.2f / %.2f м | Скорость: %.1f м/мин | ПЧ: %.1f Гц",
-                 g_winder.state,
-                 g_winder.current_length_m,
-                 g_winder.target_length_m,
-                 g_winder.line_speed_m_min,
-                 g_vfd.out_freq_hz);
+        ESP_LOGI(TAG, "ЧП: %.2f Гц (уставка %.2f) | ток %.2f А | %ld об/мин | статус 0x%04X | опросов %lu",
+                 g_vfd.out_freq_hz, g_vfd.set_freq_hz, g_vfd.out_cur_a,
+                 (long)g_vfd.rpm, g_vfd.status_word, (unsigned long)g_vfd.polls_ok);
     }
 }

@@ -376,11 +376,12 @@ static void btn_jog_cb(lv_event_t *e)
 {
     if (g_winder.state == STATE_IDLE || g_winder.state == STATE_DONE) {
         if (!start_allowed()) return;
-        ESP_LOGI(TAG, "Режим JOG (ручная заправка)");
+        ESP_LOGI(TAG, "Режим ЗАПРАВКА: толчок, частоту задаёт P2.19 привода");
         arm_release();
         g_winder.state = STATE_JOG;
         vfd_cmd_jog(false, g_winder.creep_freq_hz);
     } else if (g_winder.state == STATE_JOG) {
+        ESP_LOGI(TAG, "ЗАПРАВКА выключена");
         g_winder.state = STATE_IDLE;
         vfd_cmd_stop();
     }
@@ -595,14 +596,13 @@ static void ui_update_timer_cb(lv_timer_t *timer)
         if (g_winder.spool_remaining_len_m <= 0.05f) {
             lv_obj_set_style_text_color(lbl_spool_rem_val, COLOR_RED_BRIGHT, 0);
             if (lbl_spool_status) {
-                lv_label_set_text(lbl_spool_status, "× 0 (ПУСТА)");
+                lv_label_set_text(lbl_spool_status, "× ПУСТО");
                 lv_obj_set_style_text_color(lbl_spool_status, COLOR_RED_BRIGHT, 0);
             }
         } else if (!is_enough) {
             lv_obj_set_style_text_color(lbl_spool_rem_val, COLOR_AMBER, 0);
             if (lbl_spool_status) {
-                snprintf(str_buf, sizeof(str_buf), "× 0 (< уставки)");
-                lv_label_set_text(lbl_spool_status, str_buf);
+                lv_label_set_text(lbl_spool_status, "× 0 МАЛО");
                 lv_obj_set_style_text_color(lbl_spool_status, COLOR_AMBER, 0);
             }
         } else {
@@ -896,9 +896,13 @@ bool winder_ui_validate_text_layout(void)
         {"Табло одометра (120px)", "0000.00", FONT_DIGIT_HERO, 498},
         {"Скорость в карточке (24px)", "⚡ Скорость: 120.0 м/мин", FONT_TITLE, 500},
         {"Выработка в карточке (24px)", "Выработка смены: 2000.0 м", FONT_TITLE, 500},
-        {"Уставка заголовок (16px)", "УСТАВКА НАМОТКИ (макс. 2000 м):", FONT_RU, 460},
-        {"Бобина заголовок (16px)", "ПОДАЮЩАЯ БОБИНА (БУХТА С КАБЕЛЕМ):", FONT_RU, 460},
-        {"Остаток бобины (24px)", "2000.00 м", FONT_TITLE, 200},
+        {"БОБ. заголовок (16px)", "БОБ. — бухта, м:", FONT_RU, 300},
+        {"БОБ. примечание (16px)", "умолч. 2000", FONT_RU, 180},
+        {"БОБ. ввод (16px)", "2000.00", FONT_RU, 116},
+        {"ОСТ. заголовок (16px)", "ОСТ. — в бухте, м:", FONT_RU, 300},
+        {"ОСТ. значение (24px)", "2000.00 м", FONT_TITLE, 175},
+        {"ОСТ. статус (32px)", "× 0 МАЛО", FONT_LARGE, 154},
+        {"УСТ. заголовок (16px)", "УСТ. — уставка, м (макс. 2000):", FONT_RU, 460},
         {"Телеметрия строка (16px)", "Скорость: 120.0 м/мин  |  ПЧ Easydrive: 50.0 Гц  |  Ток: 4.50 А  |  Импульсов: 999999", FONT_RU, 1000},
         {"Калибровка колонка 1 (16px)", "2. Диск датчиков: Z = 99 зубьев (PPR = 396, 4x)", FONT_RU, 460},
         {"Калибровка колонка 2 (16px)", "6. Выработка: 2000.0 м (K = 1.00000)", FONT_RU, 520},
@@ -976,7 +980,7 @@ void winder_ui_init(void)
     #define GRID_GAP_X              12    // Горизонтальный зазор между колонками
     #define GRID_GAP_Y              8     // Вертикальный зазор между слоями
 
-    // Колонки верхнего яруса (ФАКТ МЕТРАЖА и УСТАВКА/БОБИНА)
+    // Колонки верхнего яруса (ФАКТ МЕТРАЖА и правая колонка БОБ./ОСТ./УСТ.)
     #define GRID_COL1_X             GRID_PAD_X                           // X = 8 px
     #define GRID_COL1_W             506                                  // Ширина левой карточки (одометр)
     #define GRID_COL2_X             (GRID_COL1_X + GRID_COL1_W + GRID_GAP_X) // X = 526 px
@@ -998,10 +1002,13 @@ void winder_ui_init(void)
     #define GRID_ROW4_Y             450   // Панель силовых сенсорных кнопок (H = 88 px, Y = 450..538)
     #define GRID_ROW4_H             88    // Запас до нижнего края матрицы: 12 px (550 - 538 = 12 px)
 
-    // Внутренняя сетка правой колонки (Уставка + Бобина)
-    #define GRID_TARGET_H           138   // Карточка уставки (Y = 40..178)
-    #define GRID_SPOOL_Y            (GRID_ROW1_Y + GRID_TARGET_H + GRID_GAP_Y) // Y = 186 px
-    #define GRID_SPOOL_H            (GRID_ROW1_H - GRID_TARGET_H - GRID_GAP_Y) // 124 px (Y = 186..310)
+    // Внутренняя сетка правой колонки: 3 ряда в порядке БОБ → ОСТ → УСТ
+    #define GRID_BOB_H              66    // Ряд 1: бухта (БОБ.), Y = 40..106
+    #define GRID_REM_H              66    // Ряд 2: остаток в бухте (ОСТ.), Y = 114..180
+    #define GRID_TGT_H              122   // Ряд 3: уставка (УСТ.) + дельты, Y = 188..310
+    #define GRID_BOB_Y              GRID_ROW1_Y                                 // Y = 40
+    #define GRID_REM_Y              (GRID_BOB_Y + GRID_BOB_H + GRID_GAP_Y)       // Y = 114
+    #define GRID_TGT_Y              (GRID_REM_Y + GRID_REM_H + GRID_GAP_Y)       // Y = 188
 
     /* =====================================================================
      * СЛОЙ 0: ВЕРХНИЙ СТАТУСНЫЙ БАННЕР (ПО СЕТКЕ: X=8, Y=6, W=1008, H=26)
@@ -1076,27 +1083,82 @@ void winder_ui_init(void)
     lv_obj_align(lbl_fact_prod, LV_ALIGN_TOP_LEFT, 12, 226);
 
     /* =====================================================================
-     * СЛОЙ 1, КОЛОНКА 2A: КАРТОЧКА УСТАВКИ (ПО СЕТКЕ: X=526, Y=40, W=490, H=138)
+     * СЛОЙ 1, КОЛОНКА 2 / РЯД 1: БОБ. — ПОДАЮЩАЯ БУХТА (X=526, Y=40, W=490, H=66)
      * ===================================================================== */
-    lv_obj_t *card_target = create_hmi_card(tab_main, GRID_COL2_W, GRID_TARGET_H);
-    lv_obj_align(card_target, LV_ALIGN_TOP_LEFT, GRID_COL2_X, GRID_ROW1_Y);
+    lv_obj_t *card_spool = create_hmi_card(tab_main, GRID_COL2_W, GRID_BOB_H);
+    lv_obj_align(card_spool, LV_ALIGN_TOP_LEFT, GRID_COL2_X, GRID_BOB_Y);
+
+    lv_obj_t *lbl_spool_title = lv_label_create(card_spool);
+    lv_obj_set_style_text_font(lbl_spool_title, FONT_RU, 0);
+    lv_obj_set_style_text_color(lbl_spool_title, COLOR_TEXT_DIM, 0);
+    lv_label_set_text(lbl_spool_title, "БОБ. — бухта, м:");
+    lv_obj_align(lbl_spool_title, LV_ALIGN_TOP_LEFT, 10, 5);
+
+    lv_obj_t *lbl_spool_def = lv_label_create(card_spool);
+    lv_obj_set_style_text_font(lbl_spool_def, FONT_RU, 0);
+    lv_obj_set_style_text_color(lbl_spool_def, COLOR_TEXT_DIM, 0);
+    lv_label_set_text(lbl_spool_def, "умолч. 2000");
+    lv_obj_align(lbl_spool_def, LV_ALIGN_TOP_RIGHT, -10, 5);
+
+    ta_spool_init_len = create_numeric_textarea(card_spool, 136, 38, COLOR_CYAN, FONT_RU);
+    lv_obj_align(ta_spool_init_len, LV_ALIGN_TOP_LEFT, 10, 26);
+    lv_obj_add_event_cb(ta_spool_init_len, numpad_ta_event_cb, LV_EVENT_ALL, NULL);
+
+    lv_obj_t *lbl_sp_u = lv_label_create(card_spool);
+    lv_obj_set_style_text_font(lbl_sp_u, FONT_RU, 0);
+    lv_obj_set_style_text_color(lbl_sp_u, COLOR_CYAN, 0);
+    lv_label_set_text(lbl_sp_u, "м");
+    lv_obj_align(lbl_sp_u, LV_ALIGN_TOP_LEFT, 152, 38);
+
+    /* =====================================================================
+     * СЛОЙ 1, КОЛОНКА 2 / РЯД 2: ОСТ. — ОСТАТОК В БУХТЕ (X=526, Y=114, W=490, H=66)
+     * ===================================================================== */
+    lv_obj_t *card_rem = create_hmi_card(tab_main, GRID_COL2_W, GRID_REM_H);
+    lv_obj_align(card_rem, LV_ALIGN_TOP_LEFT, GRID_COL2_X, GRID_REM_Y);
+
+    lv_obj_t *lbl_rem_title = lv_label_create(card_rem);
+    lv_obj_set_style_text_font(lbl_rem_title, FONT_RU, 0);
+    lv_obj_set_style_text_color(lbl_rem_title, COLOR_TEXT_DIM, 0);
+    lv_label_set_text(lbl_rem_title, "ОСТ. — в бухте, м:");
+    lv_obj_align(lbl_rem_title, LV_ALIGN_TOP_LEFT, 10, 5);
+
+    lbl_spool_rem_val = lv_label_create(card_rem);
+    lv_obj_set_style_text_font(lbl_spool_rem_val, FONT_TITLE, 0);
+    lv_obj_set_style_text_color(lbl_spool_rem_val, COLOR_GREEN_BRIGHT, 0);
+    lv_label_set_text(lbl_spool_rem_val, "2000.00 м");
+    lv_obj_align(lbl_spool_rem_val, LV_ALIGN_TOP_LEFT, 10, 30);
+
+    bar_spool_rem = create_styled_bar(card_rem, 132, 8, COLOR_GREEN_BRIGHT, 0, 100);
+    lv_obj_align(bar_spool_rem, LV_ALIGN_TOP_LEFT, 190, 46);
+
+    lbl_spool_status = lv_label_create(card_rem);
+    lv_obj_set_style_text_font(lbl_spool_status, FONT_LARGE, 0); // 32px
+    lv_obj_set_style_text_color(lbl_spool_status, COLOR_GREEN_BRIGHT, 0);
+    lv_label_set_text(lbl_spool_status, "× 20");
+    lv_obj_align(lbl_spool_status, LV_ALIGN_TOP_LEFT, 326, 28);
+
+    /* =====================================================================
+     * СЛОЙ 1, КОЛОНКА 2 / РЯД 3: УСТ. — УСТАВКА НАМОТКИ (X=526, Y=188, W=490, H=122)
+     * ===================================================================== */
+    lv_obj_t *card_target = create_hmi_card(tab_main, GRID_COL2_W, GRID_TGT_H);
+    lv_obj_align(card_target, LV_ALIGN_TOP_LEFT, GRID_COL2_X, GRID_TGT_Y);
 
     lv_obj_t *lbl_target_title = lv_label_create(card_target);
     lv_obj_set_style_text_font(lbl_target_title, FONT_RU, 0);
     lv_obj_set_style_text_color(lbl_target_title, COLOR_TEXT_DIM, 0);
-    lv_label_set_text(lbl_target_title, "УСТАВКА НАМОТКИ (макс. 2000 м):");
-    lv_obj_align(lbl_target_title, LV_ALIGN_TOP_LEFT, 10, 6);
+    lv_label_set_text(lbl_target_title, "УСТ. — уставка, м (макс. 2000):");
+    lv_obj_align(lbl_target_title, LV_ALIGN_TOP_LEFT, 10, 5);
 
-    // Числовое окно ввода уставки 48px по сетке (W = 144, H = 58)
+    // Числовое окно ввода уставки (W = 144, H = 58)
     ta_target_len = create_numeric_textarea(card_target, 144, 58, COLOR_AMBER, FONT_DIGIT_INPUT);
-    lv_obj_align(ta_target_len, LV_ALIGN_TOP_LEFT, 10, 32);
+    lv_obj_align(ta_target_len, LV_ALIGN_TOP_LEFT, 10, 28);
     lv_obj_add_event_cb(ta_target_len, numpad_ta_event_cb, LV_EVENT_ALL, NULL);
 
     lv_obj_t *lbl_m_sym = lv_label_create(card_target);
     lv_obj_set_style_text_font(lbl_m_sym, FONT_TITLE, 0);
     lv_obj_set_style_text_color(lbl_m_sym, COLOR_AMBER, 0);
     lv_label_set_text(lbl_m_sym, "м");
-    lv_obj_align(lbl_m_sym, LV_ALIGN_TOP_LEFT, 158, 48);
+    lv_obj_align(lbl_m_sym, LV_ALIGN_TOP_LEFT, 158, 44);
 
     // Сетка из 6 кнопок дельты (2 строки по 3 кнопки: 88x44 px, зазор 6 px)
     const int deltas[6] = {-100, -10, -1, 1, 10, 100};
@@ -1108,59 +1170,8 @@ void winder_ui_init(void)
                                           COLOR_GREY_BTN, COLOR_GREY_BORDER, 6, 
                                           delta_names[i], FONT_TITLE, 
                                           btn_target_adj_cb, (void *)(intptr_t)deltas[i]);
-        lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 196 + (col * 94), 32 + (row * 50));
+        lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 196 + (col * 94), 26 + (row * 48));
     }
-
-    /* =====================================================================
-     * СЛОЙ 1, КОЛОНКА 2B: КАРТОЧКА БОБИНЫ (ПО СЕТКЕ: X=526, Y=186, W=490, H=124)
-     * ===================================================================== */
-    lv_obj_t *card_spool = create_hmi_card(tab_main, GRID_COL2_W, GRID_SPOOL_H);
-    lv_obj_align(card_spool, LV_ALIGN_TOP_LEFT, GRID_COL2_X, GRID_SPOOL_Y);
-
-    lv_obj_t *lbl_spool_title = lv_label_create(card_spool);
-    lv_obj_set_style_text_font(lbl_spool_title, FONT_RU, 0);
-    lv_obj_set_style_text_color(lbl_spool_title, COLOR_TEXT_DIM, 0);
-    lv_label_set_text(lbl_spool_title, "ПОДАЮЩАЯ БОБИНА (БУХТА С КАБЕЛЕМ):");
-    lv_obj_align(lbl_spool_title, LV_ALIGN_TOP_LEFT, 10, 6);
-
-    // Левая подсекция бухты по сетке
-    lv_obj_t *lbl_spool_in_lbl = lv_label_create(card_spool);
-    lv_obj_set_style_text_font(lbl_spool_in_lbl, FONT_RU, 0);
-    lv_obj_set_style_text_color(lbl_spool_in_lbl, COLOR_TEXT_DIM, 0);
-    lv_label_set_text(lbl_spool_in_lbl, "Бухта (нач.):");
-    lv_obj_align(lbl_spool_in_lbl, LV_ALIGN_TOP_LEFT, 10, 26);
-
-    ta_spool_init_len = create_numeric_textarea(card_spool, 136, 46, COLOR_CYAN, FONT_TITLE);
-    lv_obj_align(ta_spool_init_len, LV_ALIGN_TOP_LEFT, 10, 48);
-    lv_obj_add_event_cb(ta_spool_init_len, numpad_ta_event_cb, LV_EVENT_ALL, NULL);
-
-    lv_obj_t *lbl_sp_u = lv_label_create(card_spool);
-    lv_obj_set_style_text_font(lbl_sp_u, FONT_RU, 0);
-    lv_obj_set_style_text_color(lbl_sp_u, COLOR_CYAN, 0);
-    lv_label_set_text(lbl_sp_u, "м");
-    lv_obj_align(lbl_sp_u, LV_ALIGN_TOP_LEFT, 150, 60);
-
-    // Правая подсекция остатка бобины по сетке
-    lv_obj_t *lbl_rem_title = lv_label_create(card_spool);
-    lv_obj_set_style_text_font(lbl_rem_title, FONT_RU, 0);
-    lv_obj_set_style_text_color(lbl_rem_title, COLOR_TEXT_DIM, 0);
-    lv_label_set_text(lbl_rem_title, "ОСТАТОК В БОБИНЕ:");
-    lv_obj_align(lbl_rem_title, LV_ALIGN_TOP_LEFT, 196, 26);
-
-    lbl_spool_rem_val = lv_label_create(card_spool);
-    lv_obj_set_style_text_font(lbl_spool_rem_val, FONT_TITLE, 0);
-    lv_obj_set_style_text_color(lbl_spool_rem_val, COLOR_GREEN_BRIGHT, 0);
-    lv_label_set_text(lbl_spool_rem_val, "1000.00 м");
-    lv_obj_align(lbl_spool_rem_val, LV_ALIGN_TOP_LEFT, 196, 48);
-
-    bar_spool_rem = create_styled_bar(card_spool, 126, 8, COLOR_GREEN_BRIGHT, 0, 100);
-    lv_obj_align(bar_spool_rem, LV_ALIGN_TOP_LEFT, 350, 32);
-
-    lbl_spool_status = lv_label_create(card_spool);
-    lv_obj_set_style_text_font(lbl_spool_status, FONT_LARGE, 0); // 32px
-    lv_obj_set_style_text_color(lbl_spool_status, COLOR_GREEN_BRIGHT, 0);
-    lv_label_set_text(lbl_spool_status, "× 10");
-    lv_obj_align(lbl_spool_status, LV_ALIGN_TOP_LEFT, 196, 78);
 
     /* =====================================================================
      * СЛОЙ 2: ПРОГРЕСС-БАР НАМОТКИ (ПО СЕТКЕ: X=8, Y=318, W=1008, H=34)

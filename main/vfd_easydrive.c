@@ -65,6 +65,7 @@ static const char *TAG = "VFD";
 
 #define VFD_UART_BUF      512
 #define VFD_CMD_QUEUE_LEN 8
+#define JOG_CHECK_MS      700   /* окно, за которое толчок обязан показать «работаю» */
 
 typedef enum {
     OP_SET_FREQ,
@@ -85,6 +86,7 @@ volatile vfd_state_t g_vfd;
 
 static QueueHandle_t  s_cmd_q;
 static SemaphoreHandle_t s_state_mtx;
+static SemaphoreHandle_t s_bus_mtx;   /* одна транзакция 485 целиком, между хозяевами шины */
 static uint32_t s_err_streak;
 static uint32_t s_retry_streak;
 static uint32_t s_poll_phase;
@@ -92,6 +94,15 @@ static bool     s_boot_stop_done;
 static uint16_t s_want_freq_reg;    /* ждём, что d-01 сойдётся с записанным */
 static uint8_t  s_tx_active = VFD_UART_TX_GPIO;
 static uint8_t  s_rx_active = VFD_UART_RX_GPIO;
+
+/* Недогляд за толчком: слово 0x0013 из табл.4 имеет бит2..3 = 00 («run for
+ * once»), привод после него останавливается сам, и второе касание той же
+ * цифры края не даёт. Проверяем обратным чтением, был ли ход; не был —
+ * пробуем слово толчка с бит2..3 = 11 («непрерывно»). */
+static uint8_t  s_jog_stage;      /* 0 нет, 1 после «однократно», 2 после «непрерывно» */
+static uint16_t s_jog_alt_word;
+static bool     s_jog_saw_run;
+static int64_t  s_jog_check_us;
 static bool     s_probing;   /* true: кадры автоподбора не идут в статистику связи */
 static int64_t  s_bus_idle_us;  /* момент, когда мы最后一次 перестали принимать линия */
 
@@ -136,7 +147,7 @@ static void dbg_frame(const uint8_t *req, uint8_t reason, const uint8_t *resp, s
     for (size_t i = 0; i < sizeof(tmp); i++) g_vfd.dbg_frame[i] = tmp[i];
 }
 
-static bool bus_xfer(const uint8_t *req, size_t req_len, uint8_t *resp, size_t resp_len)
+static bool bus_xfer_locked(const uint8_t *req, size_t req_len, uint8_t *resp, size_t resp_len)
 {
     /* Пауза ПОСЛЕ ответа ведомого. Привод переключает направление приёма и
      * пересчитывает параметры примерно столько же, сколько идёт сам кадр;
@@ -153,6 +164,20 @@ static bool bus_xfer(const uint8_t *req, size_t req_len, uint8_t *resp, size_t r
     uart_write_bytes(VFD_UART_NUM, (const char *)req, req_len);
     if (uart_wait_tx_done(VFD_UART_NUM, pdMS_TO_TICKS(100)) != ESP_OK) {
         ESP_LOGW(TAG, "TX не завершился за 100 мс");
+    }
+    /* Полудуплекс честно: всё, что пришло ДОКОНЦА нашей же передачи, — это
+     * возврат нашего кадра приёмником (авто-направление на U8 может и так,
+     * и этак). Ответ ведомого физически не мог быться раньше, чем через
+     * 20..40 мс, поэтому эти байты выбрасываем и ведём счёт. Без этого эхо
+     * 06H/10H неотличимо от ответа привода: кадр записи побайтово совпадает
+     * со своим эхом, включая CRC. */
+    {
+        size_t pending = 0;
+        uart_get_buffered_data_len(VFD_UART_NUM, &pending);
+        if (pending) {
+            if ((uint16_t)pending > g_vfd.echo_bytes) g_vfd.echo_bytes = (uint16_t)pending;
+            uart_flush_input(VFD_UART_NUM);
+        }
     }
     vTaskDelay(pdMS_TO_TICKS(VFD_FRAME_GAP_MS));
 
@@ -197,6 +222,24 @@ static bool bus_xfer(const uint8_t *req, size_t req_len, uint8_t *resp, size_t r
         return false;
     }
     return true;
+}
+
+/* Кадр на полудуплексной 485 — неделимая сделка: чужой запрос, вставший в
+ * паузу между нашим TX и ответом, приводит к огрызкам и CRC. Хозяев у шины
+ * два (vfd_task с опросом и bus_worker с экранами ПАРАМЕТРЫ/ЖУРНАЛ), поэтому
+ * захват здесь, в единственной точке выхода в линию. Худший держатель ~240 мс
+ * (15 + 100 TX + 5 + 120 таймаут), ждём вдесятеро больше: на старте UI читает
+ * таблицу параллельно с разведкой карты регистров.
+ * Отказ ждать — это НЕ ошибка привода: счётчики связи не трогаем. */
+static bool bus_xfer(const uint8_t *req, size_t req_len, uint8_t *resp, size_t resp_len)
+{
+    if (!xSemaphoreTake(s_bus_mtx, pdMS_TO_TICKS(2500))) {
+        ESP_LOGW(TAG, "шина занята >1 с, кадр пропущен");
+        return false;
+    }
+    bool ok = bus_xfer_locked(req, req_len, resp, resp_len);
+    xSemaphoreGive(s_bus_mtx);
+    return ok;
 }
 
 static bool bus_xfer_retry(const uint8_t *req, size_t req_len, uint8_t *resp, size_t resp_len)
@@ -398,6 +441,56 @@ void vfd_cmd_stop(void)              { cmd_post(OP_STOP, 0.0f, true); }
 void vfd_cmd_reset_fault(void)       { cmd_post(OP_RESET_FAULT, 0.0f, false); }
 
 /* ======================= Исполнение команды ======================= */
+/* Обратное чтение 0x2000. Эхо записи ничего не доказывает: привод на плохой
+ * кадр молчит, а на хороший отвечает побайтовой копией запроса, CRC включая.
+ * Число, которое привод сам отдаёт по 03H, — отдельное, уже независимое. */
+static void verify_cmd(uint16_t expect)
+{
+    uint16_t v = 0;
+    bool ok = vfd_read_regs(VFD_REG_CMD, &v, 1);
+    xSemaphoreTake(s_state_mtx, portMAX_DELAY);
+    g_vfd.cmd_readback    = v;
+    g_vfd.cmd_readback_ok = ok && v == expect;
+    xSemaphoreGive(s_state_mtx);
+    ESP_LOGI(TAG, "  чтение 0x2000 после записи 0x%04X: %s", expect,
+             !ok ? "привод не отдаёт" :
+             (v == expect ? "лежит то же слово" : "ЛЕЖИТ ДРУГОЕ"));
+}
+
+/* Досмотр толчка: привод сам скажет, сдвинулся ли вал. Слово из табл.4
+ * (0x0013) имеет бит2..3 = 00 «run for once», т.е. толчок с самостопом,
+ * и повторная запись того же числа края не даёт. Вариант с бит2..3 = 11
+ * («непрерывно») держит вал до слова СТОП, поэтому кнопка с ним живая. */
+static void jog_followup(void)
+{
+    if (!s_jog_stage || esp_timer_get_time() < s_jog_check_us) return;
+
+    if (s_jog_saw_run || g_vfd.out_freq_hz > 0.2f) {
+        ESP_LOGI(TAG, "толчок подтверждён словом 0x%04X: d-00 = %.2f Гц, статус 0x%04X | "
+                      "частоту толчка задаёт P2.19 привода, а не уставка панели",
+                 g_vfd.last_cmd, g_vfd.out_freq_hz, g_vfd.status_word);
+        s_jog_stage = 0;
+        s_jog_alt_word = 0;
+        return;
+    }
+    if (s_jog_stage == 1 && s_jog_alt_word) {
+        uint16_t alt = s_jog_alt_word;
+        ESP_LOGW(TAG, "слово 0x%04X («однократно») вал не сдвинуло — пробую 0x%04X («непрерывно»)",
+                 g_vfd.last_cmd, alt);
+        write_single(VFD_REG_CMD, VFD_CMD_STOP);
+        write_single(VFD_REG_CMD, alt);
+        s_jog_stage = 2;
+        s_jog_saw_run = false;
+        s_jog_check_us = esp_timer_get_time() + (int64_t)JOG_CHECK_MS * 1000;
+        return;
+    }
+    ESP_LOGE(TAG, "ни 0x0013, ни 0x001F толчка не дали: d-00 = %.2f Гц, статус 0x%04X. "
+                  "Смотрите P2.19 (при 0.00 толчка нет) и P0.04 = 2",
+             g_vfd.out_freq_hz, g_vfd.status_word);
+    s_jog_stage = 0;
+    s_jog_alt_word = 0;
+}
+
 static void exec_cmd(const vfd_cmd_msg_t *m)
 {
     uint16_t reg = clamp_hz_to_reg(m->hz);
@@ -423,11 +516,21 @@ static void exec_cmd(const vfd_cmd_msg_t *m)
     case OP_JOG_FWD:
     case OP_JOG_REV:
         cmd = (m->op == OP_JOG_FWD) ? VFD_CMD_FWD_JOG : VFD_CMD_REV_JOG;
+        /* Всегда через СТОП: без фронта бит0..1 01->11 привод толчка не
+         * видит, а слово в 0x2000 после толчка остаётся прежним. */
+        write_single(VFD_REG_CMD, VFD_CMD_STOP);
         ok = write_single(VFD_REG_CMD, cmd);
+        s_jog_alt_word = (m->op == OP_JOG_FWD) ? VFD_CMD_FWD_JOG_HOLD : VFD_CMD_REV_JOG_HOLD;
+        s_jog_stage    = ok ? 1 : 0;
+        s_jog_saw_run  = false;
+        s_jog_check_us = esp_timer_get_time() + (int64_t)JOG_CHECK_MS * 1000;
         break;
     case OP_STOP:
         cmd = VFD_CMD_STOP;
         ok = write_single(VFD_REG_CMD, cmd);
+        /* Оператор сказал «стоп» — никаких автодосмотров толчка после этого. */
+        s_jog_stage = 0;
+        s_jog_alt_word = 0;
         break;
     case OP_RESET_FAULT:
         cmd = VFD_CMD_FAULT_RESET;
@@ -442,6 +545,7 @@ static void exec_cmd(const vfd_cmd_msg_t *m)
     g_vfd.last_cmd_confirmed = false;      /* подтвердится чтением состояния */
     ESP_LOGI(TAG, "команда op=%d cmd=0x%04X hz=%.2f -> %s",
              m->op, cmd, m->hz, ok ? "принята приводом" : "НЕ ДОШЛА");
+    if (ok && cmd != 0xFFFF) verify_cmd(cmd);
 }
 
 /* ======================= Опрос телеметрии ======================= */
@@ -472,6 +576,7 @@ static void poll_telemetry(void)
         g_vfd.is_running  = (st & VFD_ST_RUNNING) != 0;
         g_vfd.is_fault    = (st & VFD_ST_FAULT) != 0;
         g_vfd.fault_code  = g_vfd.is_fault ? VFD_ST_FAULT_NUM(st) : 0;
+        if (s_jog_stage && g_vfd.is_running) s_jog_saw_run = true;
         /* Подтверждение последней команды: верим не эху записи, а тому,
          * что привод сам показал в слове состояния. */
         if (g_vfd.last_cmd_acked && g_vfd.last_cmd != 0xFFFF) {
@@ -566,12 +671,84 @@ static void probe_reg_map(void)
                          g_vfd.dbg_exp, g_vfd.dbg_got, frame);
         esp_task_wdt_reset();
     }
+
+    /* Параметры, без которых непонятно, почему команда уходит, а вал стоит.
+     * Адрес = группа.номер: P2.19 -> 0x0213 (таблица 1 мануала CV3100/MINI). */
+    static const struct { uint16_t addr; const char *name; } params[] = {
+        { 0x0004, "P0.04 источник команды" },
+        { 0x0007, "P0.07 нижний предел, 0.01 Гц" },
+        { 0x0017, "P0.23 клавиша REV/JOG" },
+        { 0x0213, "P2.19 частота толчка, 0.01 Гц" },
+        { 0x0214, "P2.20 разгон толчка, 0.1 с" },
+        { 0x0215, "P2.21 торможение толчка, 0.1 с" },
+        { 0x0802, "P8.02 таймаут связи" },
+        /* Разгон/торможение (P0.14/P0.15) измеряются в 0.1 ДОЛИ ВЫБРАННОЙ ЕДИНИЦЫ,
+         * а единицу выбирает P3.09: 0 = секунды, 1 = минуты (завод — минуты).
+         * Без этого числа 104 на панели значит то 10.4 с, то 10.4 мин. */
+        { 0x0309, "P3.09 единица времени разгона (0=с, 1=мин), шаг 0.1" },
+    };
+    for (unsigned i = 0; i < sizeof(params) / sizeof(params[0]); i++) {
+        uint16_t v;
+        esp_task_wdt_reset();
+        if (vfd_read_regs(params[i].addr, &v, 1)) {
+            ESP_LOGI(TAG, "  %s = %u (0x%04X)", params[i].name, v, v);
+        } else {
+            ESP_LOGI(TAG, "  %s: привести нельзя", params[i].name);
+        }
+    }
+
+    /* Толчок едет на P2.19, а не на уставку панели: при P2.19 = 0 кнопка
+     * ЗАПРАВКА выглядит сломанной, хотя кадры уходят исправно. */
+    uint16_t jog_hz_x100;
+    if (vfd_read_regs(0x0213, &jog_hz_x100, 1)) {
+        if (jog_hz_x100 == 0)
+            ESP_LOGE(TAG, "  P2.19 = 0.00 Гц: толчка не будет ни на каком слове — "
+                          "задайте частоту заправки (0x0213, 0.01 Гц)");
+        else
+            ESP_LOGI(TAG, "  заправка пойдёт на %.2f Гц — это P2.19, её меняет панель привода",
+                     jog_hz_x100 / 100.0f);
+    }
+
+    /* ======================= 06H и 10H по-честному =======================
+     * Эхо записи доказать ничего не может: привод на побитую команду молчит,
+     * а на верную возвращает копию запроса вплоть до CRC. Поэтому пишем то,
+     * что движение начать не может — СТОП и уже установленную частоту, —
+     * и проверяем обратным чтением. Это единственный способ отличить
+     * «кадр дошёл» от «наш же кадр вернулся в приёмник». */
+    {
+        uint16_t f = 0, r = 0, r2[2] = { 0, 0 };
+        bool got_f = vfd_read_regs(VFD_REG_FREQ_SET, &f, 1);
+        ESP_LOGW(TAG, "разведка 06H/10H: пишем СТОП и текущую уставку (вал не тронется)");
+
+        bool ok6 = write_single(VFD_REG_CMD, VFD_CMD_STOP);
+        bool rb6 = vfd_read_regs(VFD_REG_CMD, &r, 1);
+        ESP_LOGI(TAG, "  06H 0x2000=СТОП: эхо %s, обратно прочитано 0x%04X -> %s",
+                 ok6 ? "есть" : "НЕТ", rb6 ? r : 0,
+                 (ok6 && rb6 && r == VFD_CMD_STOP) ? "ПРИНЯТО" : "НЕ ПОДТВЕРЖДЕНО");
+
+        if (got_f) {
+            bool ok10 = write_pair(VFD_REG_CMD, VFD_CMD_STOP, f);
+            bool rb10 = vfd_read_regs(VFD_REG_CMD, r2, 2);
+            ESP_LOGI(TAG, "  10H 0x2000=СТОП + 0x2001=%u: эхо %s, обратно 0x%04X/0x%04X -> %s",
+                     f, ok10 ? "есть" : "НЕТ", r2[0], r2[1],
+                     (ok10 && rb10 && r2[0] == VFD_CMD_STOP && r2[1] == f)
+                         ? "ПРИНЯТО" : "НЕ ПОДТВЕРЖДЕНО");
+        } else {
+            ESP_LOGW(TAG, "  10H не проверяем: 0x2001 не читается, писать вслепую нельзя");
+        }
+        uint16_t ech = g_vfd.echo_bytes;
+        if (ech)
+            ESP_LOGW(TAG, "  внимание: линия возвращает нам %u байт нашей же передачи — "
+                          "эхо отброшено, в статистике его нет", ech);
+        else
+            ESP_LOGI(TAG, "  эха в линии нет: приёмник на время нашей передачи закрыт");
+    }
 }
 
 /* ======================= Задача-владелец шины =======================
- * Один владелец = никаких пересечения кадров. Следит за собой через
- * esp_task_wdt: завис — значит сброс, а привод без хостовых кадров уйдёт
- * в Er14 по собственному таймауту P8.02. */
+ * Кадров здесь не пересечь: второй хозяин (bus_worker из UI) ждёт мьютекс
+ * внутри bus_xfer. Следит за собой через esp_task_wdt: завис — значит сброс,
+ * а привод без хостовых кадров уйдёт в Er14 по собственному таймауту P8.02. */
 static void vfd_task(void *arg)
 {
     static const esp_task_wdt_config_t wdt_cfg = {
@@ -636,6 +813,7 @@ static void vfd_task(void *arg)
 
         /* 2. Затем опрос. */
         poll_telemetry();
+        jog_followup();
 
         /* 3. При потере связи останавливаем сами и не даём ходу из очереди.
          *    Если же умер сам ESP, станок остановит привод по P8.02 (Er14). */
@@ -680,8 +858,9 @@ static void vfd_task(void *arg)
 esp_err_t vfd_easydrive_init(void)
 {
     s_state_mtx = xSemaphoreCreateMutex();
+    s_bus_mtx = xSemaphoreCreateMutex();
     s_cmd_q = xQueueCreate(VFD_CMD_QUEUE_LEN, sizeof(vfd_cmd_msg_t));
-    if (!s_cmd_q || !s_state_mtx) return ESP_ERR_NO_MEM;
+    if (!s_cmd_q || !s_state_mtx || !s_bus_mtx) return ESP_ERR_NO_MEM;
 
     uart_config_t uc = {
         .baud_rate  = VFD_BAUD_RATE,
