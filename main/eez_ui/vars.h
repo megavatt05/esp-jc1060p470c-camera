@@ -14,49 +14,60 @@ extern "C" {
 
 enum FlowGlobalVariables {
     FLOW_GLOBAL_VARIABLE_SP_RAW = 0,
-    FLOW_GLOBAL_VARIABLE_PAR_CHANNEL = 1,
-    FLOW_GLOBAL_VARIABLE_PAR_FMAX = 2,
-    FLOW_GLOBAL_VARIABLE_PAR_FMIN = 3,
-    FLOW_GLOBAL_VARIABLE_PAR_FBASE = 4,
-    FLOW_GLOBAL_VARIABLE_PAR_ACCEL = 5,
-    FLOW_GLOBAL_VARIABLE_PAR_DECEL = 6,
-    FLOW_GLOBAL_VARIABLE_PAR_JOG = 7,
-    FLOW_GLOBAL_VARIABLE_FREQ_TXT = 8,
-    FLOW_GLOBAL_VARIABLE_STATE_TXT = 9,
-    FLOW_GLOBAL_VARIABLE_CUR_TXT = 10,
-    FLOW_GLOBAL_VARIABLE_VOLT_TXT = 11,
-    FLOW_GLOBAL_VARIABLE_RPM_TXT = 12,
-    FLOW_GLOBAL_VARIABLE_SP_TXT = 13,
-    FLOW_GLOBAL_VARIABLE_LINK_TXT = 14,
-    FLOW_GLOBAL_VARIABLE_P_MSG_TXT = 15,
-    FLOW_GLOBAL_VARIABLE_FAULT_CODE_TXT = 16,
-    FLOW_GLOBAL_VARIABLE_FAULT_NAME_TXT = 17,
-    FLOW_GLOBAL_VARIABLE_FAULT_DESC_TXT = 18,
-    FLOW_GLOBAL_VARIABLE_FAULT_TIME_TXT = 19,
-    FLOW_GLOBAL_VARIABLE_JRN0_TXT = 20,
-    FLOW_GLOBAL_VARIABLE_JRN1_TXT = 21,
-    FLOW_GLOBAL_VARIABLE_JRN2_TXT = 22,
-    FLOW_GLOBAL_VARIABLE_SNAP0_TXT = 23,
-    FLOW_GLOBAL_VARIABLE_SNAP1_TXT = 24,
-    FLOW_GLOBAL_VARIABLE_SNAP2_TXT = 25,
-    FLOW_GLOBAL_VARIABLE_SNAP3_TXT = 26,
-    FLOW_GLOBAL_VARIABLE_SNAP4_TXT = 27,
-    FLOW_GLOBAL_VARIABLE_SNAP5_TXT = 28,
-    FLOW_GLOBAL_VARIABLE_C_STATE_TXT = 29,
-    FLOW_GLOBAL_VARIABLE_C_CFG1_TXT = 30,
-    FLOW_GLOBAL_VARIABLE_C_CFG2_TXT = 31,
-    FLOW_GLOBAL_VARIABLE_C_CNT1_TXT = 32,
-    FLOW_GLOBAL_VARIABLE_C_CNT2_TXT = 33,
-    FLOW_GLOBAL_VARIABLE_C_CMD1_TXT = 34,
-    FLOW_GLOBAL_VARIABLE_C_CMD2_TXT = 35,
-    FLOW_GLOBAL_VARIABLE_C_ERR_TXT = 36,
-    FLOW_GLOBAL_VARIABLE_C_FRAME_TXT = 37
+    FLOW_GLOBAL_VARIABLE_BOB_RAW = 1,
+    FLOW_GLOBAL_VARIABLE_UST_RAW = 2,
+    FLOW_GLOBAL_VARIABLE_PAR_CHANNEL = 3,
+    FLOW_GLOBAL_VARIABLE_PAR_FMAX = 4,
+    FLOW_GLOBAL_VARIABLE_PAR_FMIN = 5,
+    FLOW_GLOBAL_VARIABLE_PAR_FBASE = 6,
+    FLOW_GLOBAL_VARIABLE_PAR_ACCEL = 7,
+    FLOW_GLOBAL_VARIABLE_PAR_DECEL = 8,
+    FLOW_GLOBAL_VARIABLE_PAR_JOG = 9,
+    FLOW_GLOBAL_VARIABLE_LEN_TXT = 10,
+    FLOW_GLOBAL_VARIABLE_SPEED_TXT = 11,
+    FLOW_GLOBAL_VARIABLE_PROD_TXT = 12,
+    FLOW_GLOBAL_VARIABLE_OST_TXT = 13,
+    FLOW_GLOBAL_VARIABLE_BATCHES_TXT = 14,
+    FLOW_GLOBAL_VARIABLE_FREQ_TXT = 15,
+    FLOW_GLOBAL_VARIABLE_STATE_TXT = 16,
+    FLOW_GLOBAL_VARIABLE_CUR_TXT = 17,
+    FLOW_GLOBAL_VARIABLE_VOLT_TXT = 18,
+    FLOW_GLOBAL_VARIABLE_RPM_TXT = 19,
+    FLOW_GLOBAL_VARIABLE_SP_TXT = 20,
+    FLOW_GLOBAL_VARIABLE_LINK_TXT = 21,
+    FLOW_GLOBAL_VARIABLE_P_MSG_TXT = 22,
+    FLOW_GLOBAL_VARIABLE_FAULT_CODE_TXT = 23,
+    FLOW_GLOBAL_VARIABLE_FAULT_NAME_TXT = 24,
+    FLOW_GLOBAL_VARIABLE_FAULT_DESC_TXT = 25,
+    FLOW_GLOBAL_VARIABLE_FAULT_TIME_TXT = 26,
+    FLOW_GLOBAL_VARIABLE_JRN0_TXT = 27,
+    FLOW_GLOBAL_VARIABLE_JRN1_TXT = 28,
+    FLOW_GLOBAL_VARIABLE_JRN2_TXT = 29,
+    FLOW_GLOBAL_VARIABLE_SNAP0_TXT = 30,
+    FLOW_GLOBAL_VARIABLE_SNAP1_TXT = 31,
+    FLOW_GLOBAL_VARIABLE_SNAP2_TXT = 32,
+    FLOW_GLOBAL_VARIABLE_SNAP3_TXT = 33,
+    FLOW_GLOBAL_VARIABLE_SNAP4_TXT = 34,
+    FLOW_GLOBAL_VARIABLE_SNAP5_TXT = 35,
+    FLOW_GLOBAL_VARIABLE_C_STATE_TXT = 36,
+    FLOW_GLOBAL_VARIABLE_C_CFG1_TXT = 37,
+    FLOW_GLOBAL_VARIABLE_C_CFG2_TXT = 38,
+    FLOW_GLOBAL_VARIABLE_C_CNT1_TXT = 39,
+    FLOW_GLOBAL_VARIABLE_C_CNT2_TXT = 40,
+    FLOW_GLOBAL_VARIABLE_C_CMD1_TXT = 41,
+    FLOW_GLOBAL_VARIABLE_C_CMD2_TXT = 42,
+    FLOW_GLOBAL_VARIABLE_C_ERR_TXT = 43,
+    FLOW_GLOBAL_VARIABLE_C_FRAME_TXT = 44
 };
 
 // Native global variables
 
 extern int32_t get_var_sp_raw();
 extern void set_var_sp_raw(int32_t value);
+extern int32_t get_var_bob_raw();
+extern void set_var_bob_raw(int32_t value);
+extern int32_t get_var_ust_raw();
+extern void set_var_ust_raw(int32_t value);
 extern int32_t get_var_par_channel();
 extern void set_var_par_channel(int32_t value);
 extern int32_t get_var_par_fmax();
@@ -71,6 +82,16 @@ extern int32_t get_var_par_decel();
 extern void set_var_par_decel(int32_t value);
 extern int32_t get_var_par_jog();
 extern void set_var_par_jog(int32_t value);
+extern const char *get_var_len_txt();
+extern void set_var_len_txt(const char *value);
+extern const char *get_var_speed_txt();
+extern void set_var_speed_txt(const char *value);
+extern const char *get_var_prod_txt();
+extern void set_var_prod_txt(const char *value);
+extern const char *get_var_ost_txt();
+extern void set_var_ost_txt(const char *value);
+extern const char *get_var_batches_txt();
+extern void set_var_batches_txt(const char *value);
 extern const char *get_var_freq_txt();
 extern void set_var_freq_txt(const char *value);
 extern const char *get_var_state_txt();

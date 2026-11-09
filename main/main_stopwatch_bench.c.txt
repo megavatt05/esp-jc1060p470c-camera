@@ -1,0 +1,173 @@
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "nvs_flash.h"
+#include "esp_log.h"
+#include "esp_lvgl_port.h"
+
+#include "board_jc1060p470c.h"
+#include "ui_stopwatch.h"
+#include "ui_test_patterns.h"
+#include "wifi_manager.h"
+
+static const char *TAG = "STOPWATCH_APP";
+
+/**
+ * @brief Задача последовательного порта (USB-Serial/JTAG, COM10)
+ * Принимает строковые команды: START, STOP, RESET, TIME, MARK, ROT <deg>
+ */
+static void stopwatch_serial_task(void *arg)
+{
+    char line[128];
+    int idx = 0;
+    ESP_LOGI(TAG, "Интерфейс команд COM10 (USB-Serial/JTAG) активирован.");
+    printf("\r\n[STOPWATCH_READY] Плата JC1060P470C готова принимать команды START, STOP, RESET, TIME, MARK, ROT <0|90|180|270>\r\n");
+
+    while (1) {
+        int c = getchar();
+        if (c == EOF || c < 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            if (idx > 0) {
+                line[idx] = '\0';
+                idx = 0;
+                if (strcasecmp(line, "START") == 0) {
+                    ui_stopwatch_start();
+                    printf("{\"status\":\"ok\",\"action\":\"start\"}\r\n");
+                } else if (strcasecmp(line, "STOP") == 0) {
+                    ui_stopwatch_stop();
+                    printf("{\"status\":\"ok\",\"action\":\"stop\"}\r\n");
+                } else if (strcasecmp(line, "RESET") == 0) {
+                    ui_stopwatch_reset();
+                    printf("{\"status\":\"ok\",\"action\":\"reset\"}\r\n");
+                } else if (strcasecmp(line, "TIME") == 0) {
+                    int64_t t = ui_stopwatch_get_time_us();
+                    printf("{\"time_us\":%lld,\"running\":%s}\r\n",
+                           (long long)t, ui_stopwatch_is_running() ? "true" : "false");
+                } else if (strcasecmp(line, "MARK") == 0) {
+                    ui_stopwatch_trigger_mark();
+                } else if (strncasecmp(line, "ROT", 3) == 0) {
+                    int deg = 0;
+                    if (sscanf(line + 3, "%d", &deg) == 1) {
+                        if (lvgl_port_lock(0)) {
+                            ui_stopwatch_set_rotation(deg);
+                            lvgl_port_unlock();
+                            printf("{\"status\":\"ok\",\"action\":\"rot\",\"deg\":%d}\r\n", deg);
+                        } else {
+                            printf("{\"status\":\"err\",\"reason\":\"lvgl_lock_failed\"}\r\n");
+                        }
+                    } else {
+                        printf("{\"status\":\"err\",\"reason\":\"invalid_rot_param\"}\r\n");
+                    }
+                } else if (strncasecmp(line, "BRIGHT", 6) == 0 || strncasecmp(line, "LIGHT", 5) == 0) {
+                    int percent = 0;
+                    const char *p = (line[0] == 'B' || line[0] == 'b') ? line + 6 : line + 5;
+                    if (sscanf(p, "%d", &percent) == 1) {
+                        if (percent < 2) percent = 2;
+                        if (percent > 95) percent = 95;
+                        board_backlight_set_percent((uint8_t)percent);
+                        printf("{\"status\":\"ok\",\"action\":\"bright\",\"percent\":%d}\r\n", percent);
+                    } else {
+                        printf("{\"status\":\"err\",\"reason\":\"invalid_bright_param\"}\r\n");
+                    }
+                } else if (strncasecmp(line, "PATTERN", 7) == 0 || strncasecmp(line, "MODE", 4) == 0) {
+                    const char *p = (line[0] == 'P' || line[0] == 'p') ? line + 7 : line + 4;
+                    while (*p == ' ') p++;
+                    if (*p == '\0') {
+                        // Выводим текущий режим
+                        pattern_mode_t cur = ui_test_patterns_get_mode();
+                        printf("{\"status\":\"ok\",\"action\":\"pattern\",\"mode\":%d,\"name\":\"%s\"}\r\n",
+                               cur, ui_test_patterns_get_name(cur));
+                    } else {
+                        if (lvgl_port_lock(0)) {
+                            bool ok = ui_test_patterns_cmd(p);
+                            lvgl_port_unlock();
+                            if (ok) {
+                                pattern_mode_t cur = ui_test_patterns_get_mode();
+                                printf("{\"status\":\"ok\",\"action\":\"pattern\",\"mode\":%d,\"name\":\"%s\"}\r\n",
+                                       cur, ui_test_patterns_get_name(cur));
+                            } else {
+                                printf("{\"status\":\"err\",\"reason\":\"unknown_pattern\",\"param\":\"%s\"}\r\n", p);
+                            }
+                        } else {
+                            printf("{\"status\":\"err\",\"reason\":\"lvgl_lock_failed\"}\r\n");
+                        }
+                    }
+                } else if (strcasecmp(line, "WIFI") == 0) {
+                    printf("{\"status\":\"ok\",\"action\":\"wifi\",\"ip\":\"%s\",\"ssid\":\"Bench-JC1060-WiFi6\"}\r\n",
+                           wifi_manager_get_ip());
+                } else if (strcasecmp(line, "REBOOT") == 0) {
+                    printf("{\"status\":\"ok\",\"action\":\"reboot\"}\r\n");
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    esp_restart();
+                } else if (strcasecmp(line, "HELP") == 0 || strcasecmp(line, "?") == 0) {
+                    printf("\r\n=== ДОСТУПНЫЕ КОМАНДЫ ПЛАТЫ JC1060P470C ===\r\n");
+                    printf("  START / STOP / RESET       - Управление отсчетом времени секундомера\r\n");
+                    printf("  TIME                       - Запрос точного времени стенда в мкс\r\n");
+                    printf("  MARK                       - Аппаратная временная метка\r\n");
+                    printf("  BRIGHT <2..95>             - Яркость светодиодной подсветки экрана (ШИМ)\r\n");
+                    printf("  ROT <0|90|180|270>         - Поворот экрана под физический угол стенда\r\n");
+                    printf("  PATTERN <TIMER|FOCUS|COLOR|GRID|GRAY|NEXT> - Переключение калибровочных таблиц\r\n");
+                    printf("  WIFI                       - Статус беспроводной сети Wi-Fi 6 и веб-сервера\r\n");
+                    printf("  HELP                       - Эта справка\r\n============================================\r\n");
+                } else {
+                    printf("{\"status\":\"unknown_cmd\",\"cmd\":\"%s\"}\r\n", line);
+                }
+            }
+        } else if (idx < sizeof(line) - 1) {
+            line[idx++] = (char)c;
+        }
+    }
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "============================================================");
+    ESP_LOGI(TAG, "  ВЫСОКОТОЧНЫЙ МИКРОСЕКУНДОМЕР ДЛЯ ТЕСТИРОВАНИЯ ЗАДЕРЖКИ");
+    ESP_LOGI(TAG, "  Плата: GUITION JC1060P470C 7\" MIPI-DSI (1024x600, GT911)");
+    ESP_LOGI(TAG, "  ESP32-P4 @ 400 MHz | 1 мкс Hardware Timer | LVGL 9.x 60 FPS");
+    ESP_LOGI(TAG, "============================================================");
+
+    // 1. Инициализация энергонезависимой памяти NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // 2. Инициализация оборудования платы JC1060P470C (LDO -> DSI -> JD9165 -> GT911 -> LVGL)
+    lv_display_t *disp = board_jc1060p470c_init();
+    if (!disp) {
+        ESP_LOGE(TAG, "Критическая ошибка: инициализация дисплея не удалась!");
+        return;
+    }
+
+    // 3. Построение графического интерфейса микросекундомера под мьютексом LVGL
+    if (lvgl_port_lock(0)) {
+        ui_stopwatch_init(disp);
+        lvgl_port_unlock();
+        ESP_LOGI(TAG, "Экран микросекундомера успешно построен и запущен!");
+    } else {
+        ESP_LOGE(TAG, "Не удалось захватить мьютекс LVGL для построения UI");
+    }
+
+    // 4. Инициализация беспроводной связи Wi-Fi 6 (ESP32-C6) и Web-пульта
+    wifi_manager_init();
+
+    // 5. Запуск задачи управления по COM10 (USB-Serial/JTAG)
+    xTaskCreatePinnedToCore(stopwatch_serial_task, "sw_serial", 4096, NULL, 5, NULL, 1);
+
+    // 6. Главный цикл диагностики
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        int64_t t = ui_stopwatch_get_time_us();
+        ESP_LOGI(TAG, "Секундомер: %lld мкс (%.3f с) | Статус: %s",
+                 (long long)t, (double)t / 1000000.0,
+                 ui_stopwatch_is_running() ? "РАБОТАЕТ" : "ПАУЗА");
+    }
+}

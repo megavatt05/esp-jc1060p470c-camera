@@ -34,6 +34,7 @@
 #include "actions.h"
 #include "eez_ui.h"
 #include "vfd_easydrive.h"
+#include "idm20_encoder.h"
 
 static const char *TAG = "EEZ_UI";
 
@@ -101,6 +102,8 @@ static const char *const FAULT_HINT[20] = {
 static int32_t s_sp_raw;
 static bool s_sp_touched;   // оператор уже двигал слайдер/кнопки -> уставку не подсаживать
 static int32_t s_par[PARAM_COUNT];
+static int32_t s_bob_raw;     // БОБ., сырое 0.01 м (тень спинбокта)
+static int32_t s_ust_raw;     // УСТ., сырое 0.01 м (тень спинбокта)
 static char s_msg[96] = "Не прочитано";
 static char s_jrn[3][96];
 static char s_snap[6][96];
@@ -291,13 +294,13 @@ static char *snr(char *buf, size_t n, const char *fmt, ...)
 
 static const char *drive_state_text(void)
 {
-    if (g_vfd.link == VFD_LINK_DEAD) return "ПРИВОД НЕ ОТВЕЧАЕТ";
+    if (g_vfd.link == VFD_LINK_DEAD) return "НЕТ СВЯЗИ С ЧП";
     if (g_vfd.link_stale) return "НЕТ СВЯЗИ";
     if (g_vfd.is_fault) return "АВАРИЯ";
     if (g_vfd.is_running) {
         if (g_vfd.status_word & VFD_ST_DECELERATING) return "ТОРМОЖЕНИЕ";
         if (g_vfd.status_word & VFD_ST_ACCELERATING) return "РАЗГОН";
-        return (g_vfd.status_word & VFD_ST_DIR_REV) ? "РАБОТА НАЗАД" : "РАБОТА ВПЕРЁД";
+        return (g_vfd.status_word & VFD_ST_DIR_REV) ? "РАБОТА НАЗАД" : "НАМОТКА";
     }
     return "ОСТАНОВЛЕН";
 }
@@ -379,7 +382,121 @@ const char *get_var_state_txt(void)
     if (g_vfd.is_fault && !g_vfd.link_stale && g_vfd.link != VFD_LINK_DEAD) {
         return snr(b, sizeof(b), "АВАРИЯ Er%02u", g_vfd.fault_code);
     }
-    return snr(b, sizeof(b), "%s", drive_state_text());
+    return drive_state_text();
+}
+
+// ---------------------------------------------------------------- НАМОТКА
+// БОБ. и УСТ. правятся спинбоксами в сырых 0.01 м (200000 = 2000.00 м),
+// ОСТ./длина/выработка только показываются и берутся из g_winder - другого
+// источника числа на экране быть не должно.
+#define WINDER_DEC      2
+#define WINDER_MAX_RAW  200000   // 2000.00 м - потолок и бухты, и уставки
+#define UST_MIN_RAW     100      // 1.00 м
+
+// Перекраска спинбокта (формат разрядов -> диапазон -> значение) сопровождается
+// служебными VALUE_CHANGED с промежуточным 0. Без этого счётчика загрузка
+// записала бы в NVS сначала 0, а потом настоящее значение: обрыв питания между
+// этими двумя кадрами оставил бы в NVS пустую бухту.
+static volatile int s_winder_sync;
+
+static void winder_spinbox_fit(lv_obj_t *sb, int32_t raw, int32_t lo, int32_t hi)
+{
+    if (!sb) return;
+    char digits[16];
+    snprintf(digits, sizeof(digits), "%d", (int)(raw < 0 ? -raw : raw));
+    int32_t int_digits = (int32_t)strlen(digits) - WINDER_DEC;
+    if (int_digits < 1) int_digits = 1;
+    const uint32_t want = (uint32_t)(int_digits + WINDER_DEC);
+    s_winder_sync++;
+    if (lv_spinbox_get_digit_count(sb) != want) {
+        lv_spinbox_set_digit_format(sb, want, WINDER_DEC);
+    }
+    lv_spinbox_set_range(sb, lo, hi);
+    lv_spinbox_set_value(sb, raw);
+    s_winder_sync--;
+}
+
+int32_t get_var_bob_raw(void) { return s_bob_raw; }
+
+void set_var_bob_raw(int32_t value)
+{
+    if (s_winder_sync > 0) return;       // служебный кадр перерисовки, не правка
+    if (value < 0) value = 0;
+    if (value > WINDER_MAX_RAW) value = WINDER_MAX_RAW;
+    if (value == s_bob_raw) return;      // эхо перерисовки спинбокта не правка
+    s_bob_raw = value;
+    g_winder.spool_initial_len_m = value / 100.0f;
+    float rem = g_winder.spool_initial_len_m - g_winder.current_length_m;
+    g_winder.spool_remaining_len_m = rem > 0.0f ? rem : 0.0f;
+    idm20_save_settings_nvs();
+    ESP_LOGI(TAG, "БОБ. -> %.2f м (остаток %.2f м), сохранено в NVS",
+             g_winder.spool_initial_len_m, g_winder.spool_remaining_len_m);
+}
+
+int32_t get_var_ust_raw(void) { return s_ust_raw; }
+
+void set_var_ust_raw(int32_t value)
+{
+    if (s_winder_sync > 0) return;
+    if (value < UST_MIN_RAW) value = UST_MIN_RAW;
+    if (value > WINDER_MAX_RAW) value = WINDER_MAX_RAW;
+    if (value == s_ust_raw) return;
+    s_ust_raw = value;
+    g_winder.target_length_m = value / 100.0f;
+    ESP_LOGI(TAG, "УСТ. -> %.2f м", g_winder.target_length_m);
+}
+
+static void ust_step(int32_t delta_raw)
+{
+    int32_t v = s_ust_raw + delta_raw;
+    if (v < UST_MIN_RAW) v = UST_MIN_RAW;
+    if (v > WINDER_MAX_RAW) v = WINDER_MAX_RAW;
+    set_var_ust_raw(v);
+}
+
+void action_ust_d100(lv_event_t *e) { (void)e; ust_step(-10000); }
+void action_ust_d10(lv_event_t *e)  { (void)e; ust_step(-1000); }
+void action_ust_d1(lv_event_t *e)   { (void)e; ust_step(-100); }
+void action_ust_u1(lv_event_t *e)   { (void)e; ust_step(100); }
+void action_ust_u10(lv_event_t *e)  { (void)e; ust_step(1000); }
+void action_ust_u100(lv_event_t *e) { (void)e; ust_step(10000); }
+
+const char *get_var_len_txt(void)
+{
+    static char b[32];
+    return snr(b, sizeof(b), "%07.2f", (double)g_winder.current_length_m);
+}
+
+const char *get_var_speed_txt(void)
+{
+    static char b[48];
+    return snr(b, sizeof(b), "%.1f м/мин", (double)g_winder.line_speed_m_min);
+}
+
+const char *get_var_prod_txt(void)
+{
+    static char b[48];
+    return snr(b, sizeof(b), "Выработка: %.1f м", (double)g_winder.total_production_m);
+}
+
+const char *get_var_ost_txt(void)
+{
+    static char b[32];
+    return snr(b, sizeof(b), "%.2f м", (double)g_winder.spool_remaining_len_m);
+}
+
+// Сколько полных уставок осталось в бухте - то же число, что считал
+// прежний LVGL-пульт ("× N").
+const char *get_var_batches_txt(void)
+{
+    static char b[32];
+    float rem = g_winder.spool_remaining_len_m;
+    float tgt = g_winder.target_length_m;
+    if (rem <= 0.05f) return snr(b, sizeof(b), "× ПУСТО");
+    if (tgt < 0.01f || rem < tgt) return snr(b, sizeof(b), "× 0 МАЛО");
+    int batches = (int)(rem / tgt);
+    if (batches > 999) batches = 999;
+    return snr(b, sizeof(b), "× %d", batches);
 }
 
 const char *get_var_link_txt(void)
@@ -596,14 +713,52 @@ void action_nav_conn(lv_event_t *e)  { (void)e; loadScreen(SCREEN_ID_CONN); }
 void action_btn_start(lv_event_t *e)
 {
     (void)e;
-    if (arm_confirm(ARM_START)) vfd_cmd_run_fwd(s_sp_raw / 100.0f);
+    ESP_LOGI(TAG, "Кнопка [ПУСК] нажата оператором!");
+
+    // 1. Проверка связи с частотником
+    if (g_vfd.link != VFD_LINK_OK) {
+        ESP_LOGW(TAG, "Отказ пуска: нет связи с частотником (RS-485 DEAD)!");
+        set_msg("НЕТ СВЯЗИ С ЧАСТОТНИКОМ!");
+        return;
+    }
+
+    // 2. Проверка аварии частотника
+    if (g_vfd.is_fault) {
+        ESP_LOGW(TAG, "Отказ пуска: частотник в аварии Er%02u!", g_vfd.fault_code);
+        set_msg("АВАРИЯ ЧАСТОТНИКА Er%02u!", g_vfd.fault_code);
+        return;
+    }
+
+    // 3. Проверка готовности по метражу
+    if (g_winder.target_length_m > 0.1f && g_winder.current_length_m >= g_winder.target_length_m) {
+        ESP_LOGW(TAG, "Отказ пуска: катушка уже намотана (%.2f м / %.2f м). Нажмите СБРОС!",
+                 g_winder.current_length_m, g_winder.target_length_m);
+        set_msg("НАМОТКА ЗАВЕРШЕНА: СБРОСЬТЕ МЕТРАЖ!");
+        return;
+    }
+
+    // 4. Запуск автомата намотки в режим ожидания разгона
+    idm20_cmd_start();
+
+    // 5. Отправка команды ПУСК в частотник
+    float target_hz = (s_sp_raw > 100) ? (s_sp_raw / 100.0f) : 40.0f;
+    vfd_cmd_run_fwd(target_hz);
+    set_msg("ПУСК: РАЗГОН ЧАСТОТНИКА (%.1f Гц)...", target_hz);
 }
 
 void action_btn_stop(lv_event_t *e)
 {
     (void)e;
     arm_release();   // снятие/останов всегда проходится одним касанием
+    ESP_LOGI(TAG, "Кнопка [СТОП] нажата оператором!");
+
+    // 1. Немедленно останавливаем автомат намотки и замораживаем счетчик
+    idm20_cmd_stop();
+
+    // 2. Отправляем команду СТОП в частотник
     vfd_cmd_stop();
+
+    set_msg("СТАНОК ОСТАНОВЛЕН ОПЕРАТОРОМ");
 }
 
 void action_btn_rev(lv_event_t *e)
@@ -622,7 +777,18 @@ void action_btn_fault_reset(lv_event_t *e)
 {
     (void)e;
     arm_release();
+    ESP_LOGI(TAG, "Кнопка [СБРОС МЕТРАЖА] нажата оператором!");
+
+    // 1. Сброс аварии частотника
     vfd_cmd_reset_fault();
+
+    // 2. Останов автомата намотки
+    idm20_cmd_stop();
+
+    // 3. Обнуление счетчика текущей намотки
+    idm20_reset_length();
+
+    set_msg("МЕТРАЖ СБРОШЕН В 0.00 М");
 }
 
 void action_fault_reset(lv_event_t *e)
@@ -683,6 +849,11 @@ static void on_sp_released(lv_event_t *e)
 static void paint_colors(void)
 {
     lv_obj_set_style_text_color(objects.lbl_state, lv_color_hex(drive_state_color()), 0);
+    // Остаток бухты красится по тому же правилу, что и число в × N:
+    // пусто - красный, не хватает на уставку - янтарный, иначе зелёный.
+    uint32_t rem_color = g_winder.spool_remaining_len_m <= 0.05f ? 0xE53935 :
+        (g_winder.spool_remaining_len_m < g_winder.target_length_m ? 0xFFB300 : 0x43A047);
+    if (objects.spn_ust_1) lv_obj_set_style_text_color(objects.spn_ust_1, lv_color_hex(rem_color), 0);
     lv_obj_set_style_text_color(objects.lbl_link, lv_color_hex(
         g_vfd.link == VFD_LINK_OK ? 0x43A047 :
         (g_vfd.link == VFD_LINK_DEGRADED ? 0xFFB300 : 0xE53935)), 0);
@@ -731,6 +902,29 @@ void eez_ui_init(void)
     for (int i = 0; i < PARAM_COUNT; i++) spinbox_fit(i, s_par[i]);
     post_job(JOB_PARAMS_READ);
 
+    // БОБ./УСТ. стартуют с того, что уже лежит в g_winder (NVS + дефолты),
+    // а не с нуля: оператор видит реальную бухту сразу после загрузки.
+    if (g_winder.spool_initial_len_m <= 0.0f || g_winder.spool_initial_len_m > 2000.0f) {
+        g_winder.spool_initial_len_m = 2000.0f;
+    }
+    s_bob_raw = (int32_t)(g_winder.spool_initial_len_m * 100.0f + 0.5f);
+    s_ust_raw = (int32_t)(g_winder.target_length_m * 100.0f + 0.5f);
+    int32_t s_ost_raw = (int32_t)(g_winder.spool_remaining_len_m * 100.0f + 0.5f);
+    winder_spinbox_fit(objects.spn_ust_2, s_bob_raw, 0, WINDER_MAX_RAW);
+    winder_spinbox_fit(objects.spn_ust_1, s_ost_raw, 0, WINDER_MAX_RAW);
+    winder_spinbox_fit(objects.spn_ust, s_ust_raw, UST_MIN_RAW, WINDER_MAX_RAW);
+    s_bob_raw = lv_spinbox_get_value(objects.spn_ust_2);
+    s_ust_raw = lv_spinbox_get_value(objects.spn_ust);
+
     ESP_LOGI(TAG, "панель EEZ: 4 экрана, параметры 0x%04X..0x%04X, уставка %d шагов",
              PARAM_REG[0], PARAM_REG[PARAM_COUNT - 1], SP_MAX_RAW);
+    ESP_LOGI(TAG, "намотка: БОБ %.2f м, ОСТ %.2f м, УСТ %.2f м, длина %.2f м, ИДМ-20 %s",
+             g_winder.spool_initial_len_m, g_winder.spool_remaining_len_m,
+             g_winder.target_length_m, g_winder.current_length_m,
+#if CONFIG_STANOK_USE_IDM20
+             "ВКЛЮЧЁН"
+#else
+             "ВЫКЛЮЧЕН (длины не будет)"
+#endif
+             );
 }

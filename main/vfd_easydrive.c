@@ -1,4 +1,5 @@
 #include "vfd_easydrive.h"
+#include "test_endpoints.h"
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
@@ -343,6 +344,7 @@ static bool pin_is_off_limits(int gpio)
         7, 8,                                     /* I2C периферии: тач + ES8311 */
         9, 10, 11, 12, 13, 48,                    /* I2S аудио + PA */
         22, 23,                                   /* тач RST, подсветка LCD */
+        24, 25,                                   /* USB-Serial-JTAG: D-/D+ консоли и прошивки */
         31, 50, 51, 52,                           /* Ethernet RMII */
         39, 40, 41, 42, 43, 44,                   /* microSD SDMMC slot 0 */
         14, 15, 16, 17, 18, 19, 54,               /* ESP-Hosted: SDIO slot 1 + RST */
@@ -623,11 +625,16 @@ static void poll_telemetry(void)
     s_poll_phase++;
 
     xSemaphoreTake(s_state_mtx, portMAX_DELAY);
-    int64_t age = (esp_timer_get_time() - g_vfd.last_ok_us) / 1000;
-    g_vfd.link_stale = (g_vfd.last_ok_us == 0) || (age > CONFIG_STANOK_LINK_TIMEOUT_MS);
-    if (!alive && g_vfd.link_stale) g_vfd.link = VFD_LINK_DEAD;
-    else if (s_retry_streak > 3)    g_vfd.link = VFD_LINK_DEGRADED;
-    else                             g_vfd.link = VFD_LINK_OK;
+#if CONFIG_STANOK_ENABLE_TEST_ENDPOINTS
+    if (!test_endpoints_is_sim_vfd())
+#endif
+    {
+        int64_t age = (esp_timer_get_time() - g_vfd.last_ok_us) / 1000;
+        g_vfd.link_stale = (g_vfd.last_ok_us == 0) || (age > CONFIG_STANOK_LINK_TIMEOUT_MS);
+        if (!alive && g_vfd.link_stale) g_vfd.link = VFD_LINK_DEAD;
+        else if (s_retry_streak > 3)    g_vfd.link = VFD_LINK_DEGRADED;
+        else                             g_vfd.link = VFD_LINK_OK;
+    }
     xSemaphoreGive(s_state_mtx);
 }
 
@@ -767,6 +774,7 @@ static void vfd_task(void *arg)
     bool pins_locked = (VFD_UART_DE_GPIO >= 0) || !CONFIG_STANOK_RS485_AUTO_PINS;
     bool map_probed = false;
     int64_t probe_after_us = 0;
+    int probe_rounds = 0;
     uint32_t down_ms = 0;
 
     while (1) {
@@ -774,12 +782,17 @@ static void vfd_task(void *arg)
 
 #if CONFIG_STANOK_RS485_AUTO_PINS
         /* Ни одного честного ответа с самого старта — возможно, перепутаны
-         * ноги UART. Ищем пару настоящими кадрами, но не чаще раза в 30 с,
-         * чтобы не гонять перебор по кругу на оборванной линии. */
+         * ноги UART. Ищем пару настоящими кадрами, но не чаще раза в 30 с
+         * и не больше двух кругов: на этой платы приёмник 485 распаян на
+         * GPIO26/27, так что молчание после двух переборов означает «нет
+         * проводки/настройки», а не «не та нога». Каждый круг — это сотни
+         * кадров, выброшенных на произвольные ноги, на станку с живым
+         * приводом это лишний шум, а не диагностика. */
         if (!pins_locked && g_vfd.polls_ok == 0 &&
             esp_timer_get_time() >= probe_after_us) {
             uint8_t tx, rx;
-            ESP_LOGW(TAG, "привод молчит: перебор пар TX/RX для линии 485");
+            ESP_LOGW(TAG, "привод молчит: перебор пар TX/RX для линии 485 (раунд %d из 2)",
+                     probe_rounds + 1);
             if (probe_bus_pins(&tx, &rx)) {
                 s_tx_active = tx; s_rx_active = rx;
                 g_vfd.uart_tx_gpio = tx;
@@ -787,11 +800,18 @@ static void vfd_task(void *arg)
                 pins_locked = true;
                 ESP_LOGI(TAG, "линия 485 найдена: TX=GPIO%d RX=GPIO%d", tx, rx);
             } else {
-                ESP_LOGE(TAG, "ни одна пара TX/RX не ответила. Проверьте wiring: A/B, "
-                              "адаптер 3.3 В, P8.01=9600 8E1, адрес %d", VFD_MODBUS_ADDR);
-                probe_after_us = esp_timer_get_time() + 30 * 1000 * 1000;
                 uart_set_pin(VFD_UART_NUM, VFD_UART_TX_GPIO, VFD_UART_RX_GPIO,
                              UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+                if (++probe_rounds >= 2) {
+                    pins_locked = true;
+                    ESP_LOGE(TAG, "перебор прекращён: опрос только на TX=GPIO%d RX=GPIO%d. "
+                                  "Проверьте wiring: A/B, адрес %d, P8.01=9600 8E1",
+                             VFD_UART_TX_GPIO, VFD_UART_RX_GPIO, VFD_MODBUS_ADDR);
+                } else {
+                    ESP_LOGE(TAG, "ни одна пара TX/RX не ответила. Проверьте wiring: A/B, "
+                                  "адаптер 3.3 В, P8.01=9600 8E1, адрес %d", VFD_MODBUS_ADDR);
+                    probe_after_us = esp_timer_get_time() + 30 * 1000 * 1000;
+                }
             }
         }
 #endif

@@ -110,12 +110,13 @@ esp_err_t board_backlight_init(void)
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
 
-    return board_backlight_set_percent(85); // 85% по умолчанию
+    return board_backlight_set_percent(20); // 20% по умолчанию для предотвращения засвета камеры
 }
 
 esp_err_t board_backlight_set_percent(uint8_t percent)
 {
-    if (percent > 100) percent = 100;
+    // Согласно документации Guition: максимум 95% для защиты преобразователя MP3202 от перегрева
+    if (percent > 95) percent = 95;
     uint32_t duty = (1023 * percent) / 100;
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
     return ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);

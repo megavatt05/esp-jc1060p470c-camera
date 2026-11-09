@@ -10,27 +10,33 @@ extern "C" {
 
 // =========================================================================
 // ПИНЫ КВАДРАТУРНОГО ЭНКОДЕРА ИДМ-20 НА ESP32-P4
-// Значения берутся из main/Kconfig.projbuild; по умолчанию датчик выключен
-// (CONFIG_STANOK_USE_IDM20=n), и эти пины ничему не мешают.
+// Гребёнка Expand IO (JP1, 2x13): фаза A = GPIO1 = физический пин 7,
+// фаза B = GPIO2 = физический пин 9. Значения берутся из
+// main/Kconfig.projbuild; по умолчанию датчик ВКЛЮЧЁН.
+// Питание датчиков — отдельный блок 12..24 В, сигнал только через
+// открытый коллектор с pull-up на 3V3 (см. README, раздел ИДМ-20).
 // =========================================================================
 #ifndef CONFIG_STANOK_IDM20_A_GPIO
-#define CONFIG_STANOK_IDM20_A_GPIO 4
+#define CONFIG_STANOK_IDM20_A_GPIO 1
 #endif
 #ifndef CONFIG_STANOK_IDM20_B_GPIO
-#define CONFIG_STANOK_IDM20_B_GPIO 5
+#define CONFIG_STANOK_IDM20_B_GPIO 2
 #endif
 #define IDM20_ENC_A_GPIO          ((gpio_num_t)CONFIG_STANOK_IDM20_A_GPIO)
 #define IDM20_ENC_B_GPIO          ((gpio_num_t)CONFIG_STANOK_IDM20_B_GPIO)
+#define IDM20_RUN_OUT_GPIO        GPIO_NUM_3
 
 typedef enum {
     STATE_IDLE = 0,
-    STATE_RUNNING,
+    STATE_STARTING,     // Команда ПУСК отправлена, ожидание подтверждения Bit4 от ЧП
+    STATE_RUNNING,      // ЧП подтвердил ход, идет намотка
     STATE_SLOWDOWN,     // Дотяжка на малой скорости перед целью
+    STATE_STOPPING,     // Команда СТОП отправлена, выбег/останов
     STATE_JOG,          // Ручная заправка кабеля
     STATE_DONE,         // Намотка завершена
     STATE_ALARM_BREAK,  // Обрыв кабеля / кончилась отдающая бухта
     STATE_ALARM_JAM,    // Заклинивание кабеля (перегруз по току)
-    STATE_ALARM_VFD     // Ошибка частотника Easydrive Mini-S
+    STATE_ALARM_VFD     // Ошибка частотника
 } winder_state_t;
 
 typedef struct {
@@ -113,6 +119,21 @@ void idm20_reset_length(void);
  * @brief Сброс суммарного счетчика выработки
  */
 void idm20_reset_production(void);
+
+/**
+ * @brief Команда на запуск автомата станка (переход в STATE_STARTING)
+ */
+void idm20_cmd_start(void);
+
+/**
+ * @brief Команда на останов автомата станка (переход в STATE_IDLE, блокировка счета)
+ */
+void idm20_cmd_stop(void);
+
+/**
+ * @brief Получение текстового названия текущего состояния станка
+ */
+const char *idm20_get_state_name(winder_state_t st);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 #include "idm20_encoder.h"
+#include "test_endpoints.h"
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,7 +16,7 @@ static const char *TAG = "IDM20_ENCODER";
 
 // Глобальное состояние станка намотки (по умолчанию колесо 102 мм, 2 датчика, Z=8 зубьев)
 winder_context_t g_winder = {
-    .target_length_m     = 100.0f,
+    .target_length_m     = 2000.0f,
     .slowdown_dist_m     = 2.50f,
     .coast_comp_m        = 0.10f,
     .roller_diam_mm      = 102.0f,  // Диаметр мерного колеса 102.0 мм (L_об = pi * 102 = 320.442 мм)
@@ -100,19 +101,22 @@ void idm20_reset_calibration(void)
 
 void idm20_reset_length(void)
 {
-    if (g_winder.state == STATE_IDLE || g_winder.state == STATE_DONE) {
-        if (s_pcnt_unit) {
-            pcnt_unit_clear_count(s_pcnt_unit);
-        }
-        // Накопление в суммарную выработку
-        g_winder.total_production_m += g_winder.current_length_m;
-        g_winder.total_pulses = 0;
-        g_winder.current_length_m = 0.0f;
-        g_winder.line_speed_m_min = 0.0f;
-        g_winder.state = STATE_IDLE;
-        idm20_save_settings_nvs();
-        ESP_LOGI(TAG, "Счетчик партии сброшен в 0.00 м (Всего выпущено: %.2f м)", g_winder.total_production_m);
+    if (s_pcnt_unit) {
+        pcnt_unit_clear_count(s_pcnt_unit);
     }
+    // Накопление в суммарную выработку
+    g_winder.total_production_m += g_winder.current_length_m;
+    g_winder.total_pulses = 0;
+    g_winder.current_length_m = 0.0f;
+    g_winder.line_speed_m_min = 0.0f;
+    g_winder.state = STATE_IDLE;
+    if (g_winder.spool_initial_len_m > 0.0f) {
+        g_winder.spool_remaining_len_m = g_winder.spool_initial_len_m;
+    }
+    gpio_set_level(IDM20_RUN_OUT_GPIO, 0);
+    idm20_save_settings_nvs();
+    ESP_LOGI(TAG, "Счетчик партии сброшен в 0.00 м (Всего выпущено: %.2f м, остаток: %.2f м)",
+             g_winder.total_production_m, g_winder.spool_remaining_len_m);
 }
 
 void idm20_reset_production(void)
@@ -120,6 +124,40 @@ void idm20_reset_production(void)
     g_winder.total_production_m = 0.0;
     idm20_save_settings_nvs();
     ESP_LOGI(TAG, "Суммарный счетчик выработки сброшен в 0.00 м");
+}
+
+static int64_t s_start_cmd_us = 0;
+
+void idm20_cmd_start(void)
+{
+    g_winder.state = STATE_STARTING;
+    s_start_cmd_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "Команда [ПУСК]: переход в STATE_STARTING, ждем подтверждения Bit4 (ХОД) от ЧП...");
+}
+
+void idm20_cmd_stop(void)
+{
+    g_winder.state = STATE_IDLE;
+    g_winder.line_speed_m_min = 0.0f;
+    gpio_set_level(IDM20_RUN_OUT_GPIO, 0);
+    ESP_LOGI(TAG, "Команда [СТОП]: переход в STATE_IDLE, счетчик метража заблокирован, RUN=LOW.");
+}
+
+const char *idm20_get_state_name(winder_state_t st)
+{
+    switch (st) {
+    case STATE_IDLE:        return "ОСТАНОВ (ГОТОВ)";
+    case STATE_STARTING:    return "РАЗГОН ЧП...";
+    case STATE_RUNNING:     return "НАМОТКА (ХОД)";
+    case STATE_SLOWDOWN:    return "ДОТЯЖКА";
+    case STATE_STOPPING:    return "ТОРМОЖЕНИЕ";
+    case STATE_JOG:         return "ТОЛЧОК";
+    case STATE_DONE:        return "ЗАВЕРШЕНО";
+    case STATE_ALARM_BREAK: return "АВАРИЯ: ОБРЫВ";
+    case STATE_ALARM_JAM:   return "АВАРИЯ: ЗАКЛИНИВАНИЕ";
+    case STATE_ALARM_VFD:   return "АВАРИЯ: ЧАСТОТНИК";
+    default:                return "НЕИЗВЕСТНО";
+    }
 }
 
 /* =========================================================================
@@ -190,8 +228,12 @@ esp_err_t idm20_load_settings_nvs(void)
     uint32_t spool_len_int = 0;
     if (nvs_get_u32(h, "spool_len", &spool_len_int) == ESP_OK && spool_len_int > 0) {
         g_winder.spool_initial_len_m = (float)spool_len_int / 100.0f;
+    } else {
+        g_winder.spool_initial_len_m = 2000.0f; // Катушка по умолчанию строго 2000 м
     }
-    if (g_winder.spool_initial_len_m > 2000.0f) g_winder.spool_initial_len_m = 2000.0f;
+    if (g_winder.spool_initial_len_m <= 0.0f || g_winder.spool_initial_len_m > 2000.0f) {
+        g_winder.spool_initial_len_m = 2000.0f;
+    }
     g_winder.spool_remaining_len_m = g_winder.spool_initial_len_m;
 
     nvs_close(h);
@@ -208,6 +250,7 @@ static void idm20_task(void *pvParameters)
     int64_t last_time_us = esp_timer_get_time();
     int64_t last_pulses = 0;
     int64_t last_motion_us = esp_timer_get_time();
+    int64_t run_start_us = 0;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(50)); // Период опроса 50 мс (20 Гц)
@@ -218,77 +261,104 @@ static void idm20_task(void *pvParameters)
             pcnt_unit_clear_count(s_pcnt_unit);
         }
 
-        // Накопление общего числа импульсов
-        g_winder.total_pulses += pulse_delta;
-        g_winder.current_length_m = idm20_calculate_length_m(g_winder.total_pulses, &g_winder);
-
-        // Расчет остатка кабеля в подающей бобине
-        if (g_winder.spool_initial_len_m > 0.0f) {
-            float rem = g_winder.spool_initial_len_m - g_winder.current_length_m;
-            g_winder.spool_remaining_len_m = (rem > 0.0f) ? rem : 0.0f;
-        } else {
-            g_winder.spool_remaining_len_m = 0.0f;
-        }
-
         int64_t now_us = esp_timer_get_time();
-        float dt_sec = (float)(now_us - last_time_us) / 1000000.0f;
 
-        if (dt_sec >= 0.04f) {
-            // Расчет приращения длины и линейной скорости
-            int64_t d_pulses = g_winder.total_pulses - last_pulses;
-            float d_len_m = idm20_calculate_length_m(d_pulses, &g_winder);
-            float inst_speed_m_min = (d_len_m / dt_sec) * 60.0f;
-
-            // Фильтр низких частот (экспоненциальное сглаживание)
-            g_winder.line_speed_m_min = 0.7f * g_winder.line_speed_m_min + 0.3f * inst_speed_m_min;
-            if (fabsf(g_winder.line_speed_m_min) < 0.05f) {
-                g_winder.line_speed_m_min = 0.0f;
-            }
-
-            if (d_pulses != 0) {
+        // 1. ХЭНДШЕЙК С ЧАСТОТНИКОМ В РЕЖИМЕ ПУСКА (STATE_STARTING)
+        if (g_winder.state == STATE_STARTING) {
+            // Частотник подтвердил ход (Bit 4 в 0x0E00)?
+            if (g_vfd.is_running) {
+                g_winder.state = STATE_RUNNING;
+                run_start_us = now_us;
                 last_motion_us = now_us;
+                ESP_LOGI(TAG, "ХЭНДШЕЙК УСПЕШЕН: ЧП подтвердил ХОД (Bit4=1, freq=%.2f Гц). Намотка пошла!", g_vfd.out_freq_hz);
+            } else if ((now_us - s_start_cmd_us) > 5000000) { // 5 сек таймаут
+                ESP_LOGE(TAG, "ОТКАЗ ХЭНДШЕЙКА: ЧП не подтвердил ХОД в течение 5 с. Возврат в ОСТАНОВ.");
+                g_winder.state = STATE_IDLE;
+                vfd_cmd_stop();
             }
-
-            last_time_us = now_us;
-            last_pulses = g_winder.total_pulses;
         }
 
-        // =====================================================================
-        // ЛОГИКА АВТОМАТА НАМОТКИ И ЗАЩИТ
-        // =====================================================================
-        float remaining_m = g_winder.target_length_m - g_winder.current_length_m;
+        // 2. УПРАВЛЕНИЕ ВНЕШНИМ СИГНАЛОМ RUN (JP1 Pin 11 / GPIO3)
+        bool is_active_run = (g_winder.state == STATE_RUNNING || g_winder.state == STATE_SLOWDOWN);
+        gpio_set_level(IDM20_RUN_OUT_GPIO, is_active_run ? 1 : 0);
 
-        switch (g_winder.state) {
-        case STATE_RUNNING:
-            // 1. Проверка дотяжки перед остановкой
-            if (remaining_m <= g_winder.slowdown_dist_m) {
-                ESP_LOGI(TAG, "Вход в зону дотяжки (осталось %.2f м). Снижение частоты до %.1f Гц",
-                         remaining_m, g_winder.creep_freq_hz);
-                g_winder.state = STATE_SLOWDOWN;
-                vfd_cmd_set_frequency(g_winder.creep_freq_hz);
+        // 3. ПОДСЧЕТ МЕТРАЖА: ТОЛЬКО ПРИ АКТИВНОЙ НАМОТКЕ!
+        if (is_active_run) {
+#if CONFIG_STANOK_ENABLE_TEST_ENDPOINTS
+            if (test_endpoints_is_sim_encoder()) {
+                // При симуляции импульсы и длина обновляются генератором симуляции
+            } else
+#endif
+            {
+                g_winder.total_pulses += pulse_delta;
+                g_winder.current_length_m = idm20_calculate_length_m(g_winder.total_pulses, &g_winder);
+
+                if (g_winder.spool_initial_len_m > 0.0f) {
+                    float rem = g_winder.spool_initial_len_m - g_winder.current_length_m;
+                    g_winder.spool_remaining_len_m = (rem > 0.0f) ? rem : 0.0f;
+                } else {
+                    g_winder.spool_remaining_len_m = 0.0f;
+                }
             }
 
-            // 2. Защита от обрыва кабеля / окончания бухты (нет импульсов > 1.5 сек)
-            if ((now_us - last_motion_us) > 1500000) {
-                ESP_LOGW(TAG, "АВАРИЯ: Обрыв кабеля или окончание отдающей бухты!");
+            float dt_sec = (float)(now_us - last_time_us) / 1000000.0f;
+            if (dt_sec >= 0.04f) {
+                int64_t d_pulses = g_winder.total_pulses - last_pulses;
+                float d_len_m = idm20_calculate_length_m(d_pulses, &g_winder);
+                float inst_speed_m_min = (d_len_m / dt_sec) * 60.0f;
+
+                g_winder.line_speed_m_min = 0.7f * g_winder.line_speed_m_min + 0.3f * inst_speed_m_min;
+                if (fabsf(g_winder.line_speed_m_min) < 0.05f) {
+                    g_winder.line_speed_m_min = 0.0f;
+                }
+
+                if (d_pulses != 0) {
+                    last_motion_us = now_us;
+                }
+                last_time_us = now_us;
+                last_pulses = g_winder.total_pulses;
+            }
+
+            // ЛОГИКА АВТОМАТА НАМОТКИ И ЗАЩИТ
+            float remaining_m = g_winder.target_length_m - g_winder.current_length_m;
+
+            if (g_winder.total_pulses < -(int64_t)g_winder.encoder_ppr_x4) {
+                ESP_LOGE(TAG, "АВАРИЯ: ИДМ-20 считает в минус (%lld имп) — перепутаны фазы A/B! СТОП.",
+                         (long long)g_winder.total_pulses);
                 g_winder.state = STATE_ALARM_BREAK;
                 vfd_cmd_stop();
             }
-            break;
 
-        case STATE_SLOWDOWN:
-            // Остановка с учетом упреждения выбега
-            if (remaining_m <= g_winder.coast_comp_m) {
-                ESP_LOGI(TAG, "Намотка завершена! Итоговая длина: %.2f м (уставка %.2f м)",
-                         g_winder.current_length_m, g_winder.target_length_m);
-                g_winder.state = STATE_DONE;
-                vfd_cmd_stop();
+            if (g_winder.state == STATE_RUNNING) {
+                // Дотяжка перед остановкой
+                if (remaining_m <= g_winder.slowdown_dist_m && g_winder.target_length_m > 5.0f) {
+                    ESP_LOGI(TAG, "Вход в зону дотяжки (осталось %.2f м). Снижение частоты до %.1f Гц",
+                             remaining_m, g_winder.creep_freq_hz);
+                    g_winder.state = STATE_SLOWDOWN;
+                    vfd_cmd_set_frequency(g_winder.creep_freq_hz);
+                }
+
+                // Защита от обрыва кабеля (активируется через 3.5 сек после старта разгона)
+                if ((now_us - run_start_us) > 3500000 && (now_us - last_motion_us) > 2500000) {
+                    ESP_LOGW(TAG, "АВАРИЯ: Нет вращения мерного колеса > 2.5 с при включенном ЧП!");
+                    g_winder.state = STATE_ALARM_BREAK;
+                    vfd_cmd_stop();
+                }
+            } else if (g_winder.state == STATE_SLOWDOWN) {
+                // Остановка по выбегу
+                if (remaining_m <= g_winder.coast_comp_m) {
+                    ESP_LOGI(TAG, "Намотка завершена! Итоговая длина: %.2f м (уставка %.2f м)",
+                             g_winder.current_length_m, g_winder.target_length_m);
+                    g_winder.state = STATE_DONE;
+                    vfd_cmd_stop();
+                }
             }
-            break;
-
-        default:
+        } else {
+            // В режимах IDLE, STOPPED, DONE, ALARM - скорость 0, импульсы не накапливаются
+            g_winder.line_speed_m_min = 0.0f;
+            last_pulses = g_winder.total_pulses;
+            last_time_us = now_us;
             last_motion_us = now_us;
-            break;
         }
     }
 }
@@ -310,8 +380,36 @@ esp_err_t idm20_encoder_init(void)
     return ESP_OK;
 #endif
 
+    /* PCNT в IDF только подключает ножку к GPIO-матрице (gpio_func_sel +
+     * gpio_input_enable) и НЕ трогает подтяжку. Индуктивный датчик со
+     * открытым коллектором без подтяжки оставляет линию висящей, а это
+     * случайные импульсы -> врёт длина. Внутренний pull-up включаем сами;
+     * внешний на 3V3 он не мешает. */
+    gpio_num_t pin_a = IDM20_ENC_A_GPIO;
+    gpio_num_t pin_b = IDM20_ENC_B_GPIO;
+#if CONFIG_STANOK_IDM20_SWAP_AB
+    { gpio_num_t t = pin_a; pin_a = pin_b; pin_b = t; }
+    ESP_LOGW(TAG, "ИДМ-20: фазы A/B МЕНЯЕТСЯ местами (CONFIG_STANOK_IDM20_SWAP_AB=y)");
+#endif
+    for (int i = 0; i < 2; i++) {
+        gpio_num_t pin = i ? pin_b : pin_a;
+        ESP_ERROR_CHECK(gpio_set_direction(pin, GPIO_MODE_INPUT));
+        ESP_ERROR_CHECK(gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY));
+    }
+
+    // Настройка выходного пина RUN_STATUS (JP1 Pin 11 = GPIO3)
+    gpio_config_t run_out_cfg = {
+        .pin_bit_mask = (1ULL << IDM20_RUN_OUT_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&run_out_cfg);
+    gpio_set_level(IDM20_RUN_OUT_GPIO, 0);
+
     ESP_LOGI(TAG, "Инициализация квадратурного энкодера (A=GPIO%d, B=GPIO%d, D=%.1fмм, Z=%u)...",
-             IDM20_ENC_A_GPIO, IDM20_ENC_B_GPIO, g_winder.roller_diam_mm, g_winder.teeth_z);
+             pin_a, pin_b, g_winder.roller_diam_mm, g_winder.teeth_z);
 
     pcnt_unit_config_t unit_config = {
         .low_limit = -32000,
@@ -320,16 +418,18 @@ esp_err_t idm20_encoder_init(void)
     };
     ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &s_pcnt_unit));
 
-    // Аппаратный фильтр от помех (дребезг до 1000 нс)
+    // Аппаратный фильтр от помех: 2 мкс. Даже на 60 м/мин настоящий фронт
+    // от датчика приходит не чаще, чем раз в ~1 мс, а наводки от частотника
+    // короче — их отрезает.
     pcnt_glitch_filter_config_t filter_config = {
-        .max_glitch_ns = 1000,
+        .max_glitch_ns = 2000,
     };
     ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(s_pcnt_unit, &filter_config));
 
     // Канал A: такт по фазе A, направление по фазе B
     pcnt_chan_config_t chan_a_config = {
-        .edge_gpio_num = IDM20_ENC_A_GPIO,
-        .level_gpio_num = IDM20_ENC_B_GPIO,
+        .edge_gpio_num = pin_a,
+        .level_gpio_num = pin_b,
     };
     ESP_ERROR_CHECK(pcnt_new_channel(s_pcnt_unit, &chan_a_config, &s_pcnt_chan_a));
     ESP_ERROR_CHECK(pcnt_channel_set_edge_action(s_pcnt_chan_a,
@@ -339,8 +439,8 @@ esp_err_t idm20_encoder_init(void)
 
     // Канал B: такт по фазе B, направление по фазе A
     pcnt_chan_config_t chan_b_config = {
-        .edge_gpio_num = IDM20_ENC_B_GPIO,
-        .level_gpio_num = IDM20_ENC_A_GPIO,
+        .edge_gpio_num = pin_b,
+        .level_gpio_num = pin_a,
     };
     ESP_ERROR_CHECK(pcnt_new_channel(s_pcnt_unit, &chan_b_config, &s_pcnt_chan_b));
     ESP_ERROR_CHECK(pcnt_channel_set_edge_action(s_pcnt_chan_b,

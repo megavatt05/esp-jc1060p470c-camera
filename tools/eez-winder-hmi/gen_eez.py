@@ -42,6 +42,7 @@ RED = (220, 38, 38)
 FAULT_BG = (40, 22, 26)
 AMBER = (245, 158, 11)
 BLUE = (37, 99, 235)
+CYAN = (0, 229, 255)
 WHITE = (255, 255, 255)
 DIM = (154, 167, 184)
 
@@ -257,46 +258,88 @@ def topbar(title, which, right=None):
 
 
 # --- ГЛАВНАЯ ---------------------------------------------------------------
-main_meas = [
-    label("lbl_meas_cap", 20, 12, "ЧАСТОТА ВЫХОДНАЯ", DIM, "body16"),
-    label("lbl_freq", 20, 40, None, WHITE, "big56", variable="freq_txt"),
-    label("lbl_freq_unit", 250, 80, "Гц", DIM, "label20"),
+# Порядок экрана 1 задан оператором: первым идёт большое табло текущей длины,
+# за ним ОДИН столбец из трёх рядов в порядке БОБ. -> ОСТ. -> УСТ. (сокращения,
+# чтобы не съедать ширину). Телеметрия ПЧ и уставка частоты потеснены в левую
+# колонку, силовые кнопки остались во всю ширину.
+#   левая колонка x=16 w=480: len 68..252, sp 260..336, mon 344..436
+#   правая колонка x=512 w=496: bob 68..156, ost 164..252, ust 260..436
+#   кнопки 444..504 (высота 60 = как у кнопок нижней навигации)
+main_len = [
+    label("lbl_len_cap", 20, 12, "ТЕКУЩАЯ ДЛИНА, М", DIM, "body16"),
+    label("lbl_len", 20, 40, None, WHITE, "big56", variable="len_txt"),
+    label("lbl_speed", 20, 116, None, GREEN, "label20", variable="speed_txt"),
+    label("lbl_prod", 20, 148, None, DIM, "label20", variable="prod_txt"),
 ]
-main_mon = [label("lbl_state_cap", 20, 96, "СОСТОЯНИЕ ПРИВОДА (0x0E00)", DIM,
-                  "body16"),
-            label("lbl_state", 20, 124, None, AMBER, "head26",
-                  variable="state_txt")]
-for nm, var, cap, x in [("lbl_cur", "cur_txt", "ТОК, А", 20),
-                        ("lbl_volt", "volt_txt", "НАПРЯЖЕНИЕ, В", 170),
-                        ("lbl_rpm", "rpm_txt", "ОБОРОТЫ, об/мин", 320)]:
-    main_mon.append(label(nm + "_cap", x, 16, cap, DIM, "body16"))
-    main_mon.append(label(nm, x, 44, None, WHITE, "label20", variable=var))
 
 main_sp = [
-    label("lbl_sp_cap", 20, 10,
-          "УСТАВКА ЧАСТОТЫ, Гц (регистр 0x2001, 0.01 Гц)", DIM, "body16"),
-    slider("sld_sp", 20, 56, 620, 32, 0, 5000, "sp_raw"),
-    button("btn_sp_dn", 660, 42, 60, 60, "-", "sp_dn", BTN_NAV,
-           WHITE, "head26"),
-    label("lbl_sp_val", 740, 56, None, WHITE, "head26", variable="sp_txt"),
-    button("btn_sp_up", 890, 42, 60, 60, "+", "sp_up", BTN_NAV,
-           WHITE, "head26"),
+    label("lbl_sp_cap", 16, 6, "УСТАВКА ЧАСТОТЫ, Гц (рег. 0x2001)", DIM,
+          "body16"),
+    slider("sld_sp", 16, 36, 280, 28, 0, 5000, "sp_raw"),
+    button("btn_sp_dn", 304, 24, 48, 48, "-", "sp_dn", BTN_NAV, WHITE,
+           "head26", 8),
+    label("lbl_sp_val", 362, 42, None, WHITE, "label20", variable="sp_txt"),
+    button("btn_sp_up", 432, 24, 48, 48, "+", "sp_up", BTN_NAV, WHITE,
+           "head26", 8),
 ]
+
+main_mon = [label("lbl_freq_cap", 12, 8, "ЧАСТОТА, Гц", DIM, "body16"),
+            label("lbl_freq", 12, 30, None, WHITE, "label20",
+                  variable="freq_txt")]
+for nm, var, cap, x in [("lbl_cur", "cur_txt", "ТОК, А", 140),
+                        ("lbl_volt", "volt_txt", "НАПР., В", 250),
+                        ("lbl_rpm", "rpm_txt", "ОБОРОТЫ", 360)]:
+    main_mon.append(label(nm + "_cap", x, 8, cap, DIM, "body16"))
+    main_mon.append(label(nm, x, 30, None, WHITE, "label20", variable=var))
+main_mon.append(label("lbl_state", 12, 62, None, AMBER, "label20",
+                      variable="state_txt"))
+
+main_bob = [
+    label("lbl_bob_cap", 16, 8, "БОБ. — подающая бухта, м", DIM, "body16"),
+    spinbox("spn_bob", 16, 36, 220, 52, 0, 200000, 6, 2, "bob_raw"),
+    label("lbl_bob_u", 246, 50, "м", CYAN, "label20"),
+    label("lbl_bob_def", 330, 52, "умолч. 2000", DIM, "body16"),
+]
+
+main_ost = [
+    label("lbl_ost_cap", 16, 8, "ОСТ. — остаток в бухте, м", DIM, "body16"),
+    label("lbl_ost", 16, 36, None, CYAN, "head26", variable="ost_txt"),
+    label("lbl_batches", 300, 36, None, GREEN, "head26",
+          variable="batches_txt"),
+]
+
+main_ust = [
+    label("lbl_ust_cap", 16, 8, "УСТ. — уставка намотки, м (макс. 2000)", DIM,
+          "body16"),
+    spinbox("spn_ust", 16, 40, 220, 56, 100, 200000, 6, 2, "ust_raw"),
+    label("lbl_ust_u", 246, 56, "м", AMBER, "label20"),
+]
+# Шаг каждого дельта-кнопки в сырых 0.01 м реализует прошивка
+# (action_ust_d100 ... action_ust_u100 в eez_glue.c).
+for i, (key, cap) in enumerate([("btn_ust_d100", "-100"), ("btn_ust_d10", "-10"),
+                                ("btn_ust_d1", "-1"), ("btn_ust_u1", "+1"),
+                                ("btn_ust_u10", "+10"),
+                                ("btn_ust_u100", "+100")]):
+    main_ust.append(button(key, 272 + (i % 3) * 72, 40 + (i // 3) * 60, 68, 52,
+                           cap, key[4:], BTN, WHITE, "label20", 8))
 
 main = [topbar("EASYDRIVE - НАМОТКА PON", "main"),
         panel("link", 600, 0, 424, 56,
               [label("lbl_link", 0, 0, None, DIM, "body16", center=True,
                      variable="link_txt")], TOPBAR, 0),
-        panel("meas", 16, 68, 480, 196, main_meas),
-        panel("mon", 512, 68, 496, 196, main_mon),
-        panel("sp", 16, 276, 992, 116, main_sp)]
+        panel("len", 16, 68, 480, 184, main_len),
+        panel("sp", 16, 260, 480, 76, main_sp),
+        panel("mon", 16, 344, 480, 92, main_mon),
+        panel("bob", 512, 68, 496, 88, main_bob),
+        panel("ost", 512, 164, 496, 88, main_ost),
+        panel("ust", 512, 260, 496, 176, main_ust)]
 for i, (key, cap, col, fg) in enumerate([
         ("btn_start", "ПУСК", GREEN, WHITE),
         ("btn_stop", "СТОП", RED, WHITE),
         ("btn_jog", "ТОЛЧОК", BLUE, WHITE),
         ("btn_rev", "РЕВЕРС", BTN, WHITE),
         ("btn_fault_reset", "СБРОС", AMBER, BG)]):
-    main.append(button(key, 16 + i * 200, 404, 190, 96, cap, key,
+    main.append(button(key, 16 + i * 200, 444, 190, 60, cap, key,
                        col, fg, "head26"))
 main.append(navbar("main"))
 
@@ -418,9 +461,12 @@ PAGES = [("main", main), ("params", params), ("alarm", alarm), ("conn", conn)]
 # integer — то, что крутят руками (слайдер и спинбоксы), в сырых единицах
 # регистра. string — всё, что только показывают: формат числа остаётся в
 # прошивке, а не в движке выражений EEZ.
-VARS = [("sp_raw", "integer", "0")]
+VARS = [("sp_raw", "integer", "0"),
+        # БОБ. и УСТ. в сырых 0.01 м: 200000 = 2000.00 м, 10000 = 100.00 м.
+        ("bob_raw", "integer", "200000"), ("ust_raw", "integer", "10000")]
 VARS += [("par_" + k, "integer", "0") for k, *_ in PARAMS]
 VARS += [(v, "string", '""') for v in [
+    "len_txt", "speed_txt", "prod_txt", "ost_txt", "batches_txt",
     "freq_txt", "state_txt", "cur_txt", "volt_txt", "rpm_txt", "sp_txt",
     "link_txt", "p_msg_txt",
     "fault_code_txt", "fault_name_txt", "fault_desc_txt", "fault_time_txt",
@@ -445,6 +491,8 @@ ACTIONS = ["nav_main", "nav_params", "nav_alarm",
            "nav_conn", "btn_start", "btn_stop",
            "btn_jog", "btn_rev", "btn_fault_reset",
            "sp_up", "sp_dn",
+           "ust_d100", "ust_d10", "ust_d1",
+           "ust_u1", "ust_u10", "ust_u100",
            "par_read", "par_write",
            "journal_read", "fault_reset",
            "counters_reset"]

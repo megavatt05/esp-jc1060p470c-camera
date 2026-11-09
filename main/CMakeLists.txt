@@ -19,9 +19,13 @@ set(EEZ_UI_SRCS
 idf_component_register(
     SRCS
         "main.c"
+        "ui_stopwatch.c"
+        "ui_test_patterns.c"
+        "wifi_manager.c"
         "board_jc1060p470c.c"
         "idm20_encoder.c"
         "vfd_easydrive.c"
+        "test_endpoints.c"
         ${EEZ_UI_SRCS}
         "fonts/lv_font_dejavu_16.c"
         "fonts/lv_font_dejavu_24.c"
@@ -37,6 +41,11 @@ idf_component_register(
         nvs_flash
         esp_timer
         esp_hw_support
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        lwip
         esp_driver_ledc
         esp_driver_uart
         esp_driver_pcnt
